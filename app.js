@@ -1,30 +1,15 @@
 /* ======================================================
-   消費税法 暗記アプリ
-   - レイアウト/デザインは既存のまま
-   - 修正点
-     1) Aタブ：赤マスク(.mask)をタップでその部分だけ個別表示（peek）
-     2) Bタブ/C編集モーダル：文字を選択しただけで自動マスク付与
-     3) 繰り返し：直前に「保存」した本文＋カテゴリを復元
-   - 同期UIはCタブに集約（既存のまま）
+   消費税法 暗記アプリ（同期機能廃止版）
+   - Chart.js を用いてカテゴリごとの正答率を表示
+   - 日別の正答/回答を localStorage にて保存（直近30日表示）
    ====================================================== */
 (() => {
-  /* ===== 設定（必要に応じて差し替え） ===== */
-  const CONFIG = {
-    OAUTH_CLIENT_ID: '727845914673-nmvo6be9cfd6rt8ijir6r14fnfhoqoo7.apps.googleusercontent.com',
-    HARD_CODED_SHEET_ID: '1jQExW8ayeDhaDZ3E2PN7GWJRZ9TNCSTFFW0EFSoVn3M',          // 固定したい場合は Spreadsheet ID をここに
-    SHEET_PROBLEMS: 'Problems',
-    SHEET_DAILY: 'Daily',
-  };
-
   /* ===== LocalStorage Keys ===== */
   const LS_KEYS = {
     PROBLEMS: 'problems_v1',
     APPSTATE: 'app_state_v1',
     DAILYSTATS: 'daily_stats_v1',
-    DAILYTHRESH: 'daily_thresholds_v1',
-    OUTBOX: 'outbox_v1',
-    SYNC: 'sync_settings_v1',
-    CLOUD_INDEX: 'cloud_index_v1',
+    CATEGORY_STATS: 'category_stats_v1',
   };
 
   /* ===== 便利関数 ===== */
@@ -34,20 +19,16 @@
     saveJSON(LS_KEYS.PROBLEMS, problems);
     saveJSON(LS_KEYS.APPSTATE, appState);
     saveJSON(LS_KEYS.DAILYSTATS, dailyStats);
-    saveJSON(LS_KEYS.DAILYTHRESH, dailyThresholds);
-    saveJSON(LS_KEYS.OUTBOX, outbox);
-    saveJSON(LS_KEYS.SYNC, syncSettings);
-    saveJSON(LS_KEYS.CLOUD_INDEX, cloudIndex);
+    saveJSON(LS_KEYS.CATEGORY_STATS, categoryStats);
   };
   const uuid = ()=>'p-'+Math.random().toString(36).slice(2)+Date.now().toString(36);
-  const todayKey=()=>{const d=new Date();return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;};
+  const todayKey = ()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
   const clamp=(n,min,max)=>Math.min(max,Math.max(min,n));
-  const sanitizeHTML=(html)=>{ const d=document.createElement('div'); d.innerHTML=html; d.querySelectorAll('script,style,iframe,object,embed').forEach(n=>n.remove()); d.querySelectorAll('*').forEach(el=>{[...el.attributes].forEach(a=>{ if(/^on/i.test(a.name)) el.removeAttribute(a.name); });}); return d.innerHTML; };
-  const parseCategories=s=>s.split(',').map(x=>x.trim()).filter(Boolean);
+  const parseCategories=s=>s?String(s).split(',').map(x=>x.trim()).filter(Boolean):[];
   const extractAnswersFrom=el=>Array.from(el.querySelectorAll('.mask')).map(m=>(m.textContent||'').trim()).filter(Boolean);
   const unmaskAllIn=el=>el.querySelectorAll('.mask').forEach(m=>{ const p=m.parentNode; while(m.firstChild)p.insertBefore(m.firstChild,m); p.removeChild(m); });
   const firstSentenceFromHTML = (html)=>{ const d=document.createElement('div'); d.innerHTML=html; const t=(d.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return '(空)'; const i=t.indexOf('。'); if(i>=0) return t.slice(0,Math.min(i+1,120)); return t.slice(0,100)+(t.length>100?'…':''); };
-  const safeParseJSON=(s,fb)=>{ try{ return s?JSON.parse(s):fb; }catch{ return fb; } };
+  const sanitizeHTML=(html)=>{ const d=document.createElement('div'); d.innerHTML=html; d.querySelectorAll('script,style,iframe,object,embed').forEach(n=>n.remove()); d.querySelectorAll('*').forEach(el=>{[...el.attributes].forEach(a=>{ if(/^on/i.test(a.name)) el.removeAttribute(a.name); });}); return d.innerHTML; };
 
   /* ===== 状態 ===== */
   let problems = loadJSON(LS_KEYS.PROBLEMS, []);
@@ -59,21 +40,10 @@
     lastSavedHTML: "",
     lastSavedCats: [],
   });
-  let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {});
-  let dailyThresholds = loadJSON(LS_KEYS.DAILYTHRESH, {});
-  let outbox = loadJSON(LS_KEYS.OUTBOX, []);
-  let cloudIndex = loadJSON(LS_KEYS.CLOUD_INDEX, { problems: {}, daily: {} });
+  let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {}); // { "YYYY-MM-DD": { correct: n, total: n } }
+  let categoryStats = loadJSON(LS_KEYS.CATEGORY_STATS, {}); // { "カテゴリ名": { correct: n, total: n } }
 
-  // 同期設定
-  let syncSettings = loadJSON(LS_KEYS.SYNC, {
-    clientId: CONFIG.OAUTH_CLIENT_ID,
-    sheetId: '',
-    sheetProblems: CONFIG.SHEET_PROBLEMS,
-    sheetDaily: CONFIG.SHEET_DAILY,
-  });
-  if (CONFIG.HARD_CODED_SHEET_ID) syncSettings.sheetId = CONFIG.HARD_CODED_SHEET_ID;
-
-  /* ===== DOM 取得（存在しない場合も想定して安全に） ===== */
+  /* ===== DOM 取得 ===== */
   const $ = (s)=>document.querySelector(s);
   const $$ = (s)=>document.querySelectorAll(s);
 
@@ -103,17 +73,6 @@
   const clearCatFilterBtn = $('#clearCatFilterBtn');
   const exportJsonBtn = $('#exportJsonBtn');
   const importJsonInput = $('#importJsonInput');
-
-  // 同期UI（Cタブ）
-  const syncBadge = $('#syncBadge');
-  const loginBtn = $('#loginBtn');
-  const logoutBtn = $('#logoutBtn');
-  const syncNowBtn = $('#syncNowBtn');
-  const syncSettingsDetails = $('#syncSettingsDetails');
-  const sheetIdInput = $('#sheetIdInput');
-  const sheetProblemsInput = $('#sheetProblemsInput');
-  const sheetDailyInput = $('#sheetDailyInput');
-  const saveSyncSettingsBtn = $('#saveSyncSettingsBtn');
 
   // D
   const progressCanvas = $('#progressChart');
@@ -236,7 +195,7 @@
   if (catInput) catInput.addEventListener('change', ()=>{ appState.lastPastedCats = catInput.value.trim(); saveAll(); });
 
   if (saveProblemBtn){
-    saveProblemBtn.addEventListener('click', ()=>{
+    saveProblemBtn.addEventListener('click', ()=>{ 
       if (!editor) return;
       const html = editor.innerHTML.trim();
       if (!html){ alert('長文を入力してください。'); return; }
@@ -245,35 +204,23 @@
       const categories = parseCategories(catInput?catInput.value:'');
       const now=Date.now(); const id=uuid();
       problems.push({ id, html, answers, categories, score:0, answerCount:0, correctCount:0, deleted:false, createdAt:now, updatedAt:now });
-      outbox.push({ kind:'problem', id, op:'upsert', updatedAt: now });
-
       // 繰り返し用に覚える
       appState.lastSavedHTML = html;
       appState.lastSavedCats = categories;
-
       saveAll();
       editor.innerHTML=''; if (catInput) catInput.value='';
-      alert('保存しました。（Cタブに反映 & 同期キューに追加）');
+      alert('保存しました。（Cタブに反映）');
+      renderC();
     });
   }
 
-  /* ===== C：編集/確認 + 同期 ===== */
+  /* ===== C：編集/確認 ===== */
   let currentCatFilter = [];
   function renderC(){
     renderCategoryChips();
     renderProblemList();
-    setupSyncUIVisibility();
   }
-  function setupSyncUIVisibility(){
-    if (!sheetIdInput || !sheetProblemsInput || !sheetDailyInput) return;
-    sheetIdInput.value = syncSettings.sheetId || '';
-    sheetProblemsInput.value = syncSettings.sheetProblems || CONFIG.SHEET_PROBLEMS;
-    sheetDailyInput.value = syncSettings.sheetDaily || CONFIG.SHEET_DAILY;
-    if (CONFIG.HARD_CODED_SHEET_ID){
-      sheetIdInput.disabled=true; sheetProblemsInput.disabled=true; sheetDailyInput.disabled=true;
-      if (syncSettingsDetails) syncSettingsDetails.style.display='none';
-    }
-  }
+
   function renderCategoryChips(){
     if (!catChips) return;
     const all=new Set();
@@ -316,7 +263,6 @@
       bDel.addEventListener('click', ()=>{
         if(!confirm('この問題を削除（ソフト）しますか？')) return;
         p.deleted=true; p.updatedAt=Date.now();
-        outbox.push({ kind:'problem', id:p.id, op:'upsert', updatedAt:p.updatedAt });
         saveAll(); renderC();
       });
       sub.appendChild(s1); sub.appendChild(s2); sub.appendChild(bEdit); sub.appendChild(bDel);
@@ -329,7 +275,7 @@
   }
 
   if (exportJsonBtn) exportJsonBtn.addEventListener('click', ()=>{
-    const blob=new Blob([JSON.stringify({problems,dailyStats,dailyThresholds},null,2)],{type:'application/json'});
+    const blob=new Blob([JSON.stringify({problems,dailyStats,categoryStats},null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const d=new Date(); const name=`anki_export_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.json`;
     const a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url);
@@ -342,7 +288,7 @@
         const map=new Map(problems.map(p=>[p.id,p])); data.problems.forEach(p=>map.set(p.id,p)); problems=Array.from(map.values());
       }
       if (data.dailyStats && typeof data.dailyStats==='object') dailyStats={...dailyStats,...data.dailyStats};
-      if (data.dailyThresholds && typeof data.dailyThresholds==='object') dailyThresholds={...dailyThresholds,...data.dailyThresholds};
+      if (data.categoryStats && typeof data.categoryStats==='object') categoryStats={...categoryStats,...data.categoryStats};
       saveAll(); renderC(); alert('インポートしました。');
     }catch(err){ console.error(err); alert('JSONの読み込みに失敗しました。'); }
     finally{ importJsonInput.value=''; }
@@ -357,7 +303,6 @@
     if (editEditor){
       editEditor.innerHTML = sanitizeHTML(p.html);
       editEditor.classList.add('editing');
-      // キャレット末尾
       requestAnimationFrame(()=>{
         const r=document.createRange(); r.selectNodeContents(editEditor); r.collapse(false);
         const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); editEditor.focus();
@@ -371,6 +316,7 @@
     if (!editModal) return;
     editModal.classList.add('hidden'); editModal.setAttribute('aria-hidden','true');
     if (editEditor){ editEditor.classList.remove('editing'); editEditor.innerHTML=''; }
+    document.querySelector('[data-target="#tab-c"]')?.focus();
   }
   if (editMaskBtn && editEditor) editMaskBtn.addEventListener('click', ()=>toggleMaskSelection(editEditor));
   if (editUnmaskAllBtn && editEditor) editUnmaskAllBtn.addEventListener('click', ()=>unmaskAllIn(editEditor));
@@ -381,10 +327,8 @@
     p.answers=extractAnswersFrom(editEditor);
     p.categories=parseCategories(editCatInput?editCatInput.value:'');
     p.updatedAt=Date.now();
-    outbox.push({ kind:'problem', id:p.id, op:'upsert', updatedAt:p.updatedAt });
     saveAll(); closeEditModal(); renderC();
   });
-  // モーダル：自動マスク（編集画面）
   if (editEditor){
     ['mouseup','keyup','touchend'].forEach(ev=>{
       editEditor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editEditor), 10));
@@ -428,12 +372,6 @@
     const selected=Array.from(catModalBody.querySelectorAll('input[type=checkbox]:checked')).map(c=>c.value);
     if (catModal){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); }
     if (!selected.length){ alert('カテゴリを1つ以上選択してください。'); return; }
-      // ✅ 次の問題ロードなどでカテゴリ再利用されるように
-  if (appState.lastSavedCats?.length && catsInput){
-    catsInput.value = appState.lastSavedCats.join(', ');
-  }
-
-  
     startSession(selected);
   });
 
@@ -457,7 +395,6 @@
   function setReveal(show){
     isRevealed = show;
     if (!questionContainer) return;
-    // 個別 peek は毎回クリア
     questionContainer.querySelectorAll('.mask.peek').forEach(m=>m.classList.remove('peek'));
     if (show){
       if (revealBtn) revealBtn.textContent='解答を隠す';
@@ -484,7 +421,6 @@
   }
   const weightOf = (p)=>1/(1+Math.max(0,p.score||0)); // シンプル重み
   function nextQuestionId(){
-    // ×の5問後再出題
     appState.forcedQueue.forEach(it=>it.delay--);
     const idx=appState.forcedQueue.findIndex(it=>it.delay<=0);
     if (idx>=0){
@@ -503,6 +439,8 @@
     const fb=items[0]?.id ?? currentPool[0];
     appState.recentQueue.push(fb); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return fb;
   }
+
+  // grading: update problem score, dailyStats, categoryStats
   function gradeCurrent(mark){
     const p=problems.find(x=>x.id===currentId); if(!p) return;
     let d=0; if(mark==='o') d=+1; else if(mark==='d') d=-0.5; else if(mark==='x') d=-1;
@@ -511,240 +449,80 @@
     p.updatedAt=Date.now();
     if (mark==='x') appState.forcedQueue.push({ id:p.id, delay:5 });
 
-    const dk=todayKey();
-    if (!dailyStats[dk]) dailyStats[dk]={ correct:0, total:0 };
-    dailyStats[dk].total+=1; if (mark==='o') dailyStats[dk].correct+=1;
+    // --- daily stats ---
+    const dk = todayKey();
+    if (!dailyStats[dk]) dailyStats[dk] = { correct:0, total:0 };
+    dailyStats[dk].total += 1;
+    if (mark==='o') dailyStats[dk].correct += 1;
 
-    const ge3=problems.filter(x=>!x.deleted && (x.score||0)>=3).length;
-    const ge5=problems.filter(x=>!x.deleted && (x.score||0)>=5).length;
-    const ge10=problems.filter(x=>!x.deleted && (x.score||0)>=10).length;
-    dailyThresholds[dk]={ ge3, ge5, ge10 };
+    // --- category stats: attribute this attempt to all categories of the problem ---
+    (p.categories||[]).forEach(cat=>{
+      if (!categoryStats[cat]) categoryStats[cat] = { correct:0, total:0 };
+      categoryStats[cat].total += 1;
+      if (mark==='o') categoryStats[cat].correct += 1;
+    });
 
-    outbox.push({ kind:'problem', id:p.id, op:'upsert', updatedAt:p.updatedAt });
-    outbox.push({ kind:'daily', date:dk, op:'upsert', updatedAt:Date.now() });
-
-    saveAll(); renderQuestion(nextQuestionId());
+    saveAll();
+    renderD(); // reflect stats immediately
+    renderQuestion(nextQuestionId());
   }
 
-  /* ===== D：記録 ===== */
-  function renderD(){ renderDailyList(); renderProgress(); }
+  /* ===== D：記録（カテゴリ別グラフ + 日別履歴） ===== */
+  let progressChart = null;
+
+  function renderD(){
+    renderCategoryChart();
+    renderDailyList();
+  }
+
+  function renderCategoryChart(){
+    if (!progressCanvas || !window.Chart) return;
+    // prepare data
+    const cats = Object.keys(categoryStats).sort((a,b)=>a.localeCompare(b,'ja'));
+    const labels = cats.length?cats:['(データなし)'];
+    const rates = cats.map(c=>{
+      const s = categoryStats[c] || { correct:0, total:0 };
+      return s.total? Math.round((s.correct / s.total) * 1000)/10 : 0; // 百分率（小数1位）
+    });
+    const data = { labels, datasets: [{ label: '正答率（%）', data: rates }] };
+    const options = {
+      responsive:true, maintainAspectRatio:false,
+      scales: { y: { beginAtZero:true, max:100, ticks:{ callback: v => v + '%' } } },
+      plugins: { legend: { display:false } }
+    };
+    if (progressChart){ progressChart.destroy(); progressChart=null; }
+    progressChart = new Chart(progressCanvas, { type:'bar', data, options });
+  }
+
   function renderDailyList(){
     if (!dailyList) return;
-    dailyList.innerHTML='';
-    const entries=Object.entries(dailyStats).sort((a,b)=>a[0].localeCompare(b[0],'ja'));
-    if (!entries.length){ const div=document.createElement('div'); div.className='muted'; div.textContent='まだ記録がありません。'; dailyList.appendChild(div); return; }
-    for(const [k,v] of entries){
-      const row=document.createElement('div'); row.className='daily-item';
-      const left=document.createElement('div'); left.textContent=k;
-      const right=document.createElement('div'); right.textContent=`${v.correct}/${v.total}`;
-      row.appendChild(left); row.appendChild(right); dailyList.appendChild(row);
+    dailyList.innerHTML = '';
+    // get last 30 days keys (even if empty days we can show 0/0 if desired)
+    const entries = Object.entries(dailyStats).sort((a,b)=>a[0].localeCompare(b[0],'ja'));
+    // filter to last 30 days
+    const today = new Date();
+    const days = [];
+    for(let i=0;i<30;i++){
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      days.push(key);
     }
-  }
-  // Chart.js あり/なし両対応（なければスキップ）
-  let progressChart=null;
-  function renderProgress(){
-    if (!progressCanvas || !window.Chart) return;
-    const labels=Array.from(new Set([...Object.keys(dailyThresholds), ...Object.keys(dailyStats)])).sort((a,b)=>a.localeCompare(b,'ja'));
-    const ge3Arr=labels.map(k=>dailyThresholds[k]?.ge3??0);
-    const ge5Arr=labels.map(k=>dailyThresholds[k]?.ge5??0);
-    const ge10Arr=labels.map(k=>dailyThresholds[k]?.ge10??0);
-    const only10=ge10Arr;
-    const only5=ge5Arr.map((v,i)=>Math.max(0,v-ge10Arr[i]));
-    const only3=ge3Arr.map((v,i)=>Math.max(0,v-ge5Arr[i]));
-    const data={ labels, datasets:[
-      { label:'スコア +3 以上（3〜4）', data: only3 },
-      { label:'スコア +5 以上（5〜9）', data: only5 },
-      { label:'スコア +10', data: only10 },
-    ]};
-    const opt={ responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
-      scales:{ x:{ stacked:true }, y:{ stacked:true, beginAtZero:true } } };
-    if (progressChart){ progressChart.destroy(); progressChart=null; }
-    progressChart=new Chart(progressCanvas,{ type:'bar', data, options:opt });
-  }
-
-  /* ===== Google Sheets 同期（Cタブに集約。コードは最小変更） ===== */
-  const SCOPES='https://www.googleapis.com/auth/spreadsheets';
-  const DISCOVERY_DOC='https://sheets.googleapis.com/$discovery/rest?version=v4';
-  let tokenClient=null, accessToken=null;
-
-  if (saveSyncSettingsBtn){
-    saveSyncSettingsBtn.addEventListener('click', ()=>{
-      if (CONFIG.HARD_CODED_SHEET_ID){ alert('シートIDはコードに埋め込み済みです。'); return; }
-      if (sheetIdInput) syncSettings.sheetId = sheetIdInput.value.trim();
-      if (sheetProblemsInput) syncSettings.sheetProblems = sheetProblemsInput.value.trim()||CONFIG.SHEET_PROBLEMS;
-      if (sheetDailyInput) syncSettings.sheetDaily = sheetDailyInput.value.trim()||CONFIG.SHEET_DAILY;
-      saveAll(); updateSyncBadge('設定保存','yellow');
+    days.forEach(k=>{
+      const v = dailyStats[k] || { correct:0, total:0 };
+      const row = document.createElement('div'); row.className = 'daily-item';
+      const left = document.createElement('div'); left.textContent = k;
+      const right = document.createElement('div'); right.textContent = `${v.correct} / ${v.total}`;
+      row.appendChild(left); row.appendChild(right);
+      dailyList.appendChild(row);
     });
   }
-  function updateSyncBadge(text,color){
-    if (!syncBadge) return;
-    syncBadge.textContent=text;
-    syncBadge.className='badge '+({green:'badge-green',yellow:'badge-yellow',red:'badge-red',gray:'badge-gray'}[color]||'badge-gray');
-  }
-  const gapiLoad=()=>new Promise((res,rej)=>{ if (window.gapi?.client) return res(); gapi.load('client',{callback:res,onerror:rej}); });
-  const isSignedIn=()=>!!accessToken;
-
-  if (loginBtn){
-    loginBtn.addEventListener('click', async ()=>{
-      try{
-        await gapiLoad(); await gapi.client.init({ discoveryDocs:[DISCOVERY_DOC] });
-        tokenClient = google.accounts.oauth2.initTokenClient({
-          client_id: syncSettings.clientId,
-          scope: SCOPES,
-          callback: (resp)=>{
-            if (resp && resp.access_token){
-              accessToken=resp.access_token; gapi.client.setToken({access_token:accessToken});
-              updateSyncBadge('ログイン済み','green');
-              pullAndMerge().catch(console.error); // Pullのみ
-            }else{
-              updateSyncBadge('ログイン失敗','red'); alert('Googleログインに失敗しました。');
-            }
-          }
-        });
-        tokenClient.requestAccessToken({ prompt:'consent' });
-      }catch(e){ console.error(e); updateSyncBadge('ログイン失敗','red'); alert('Googleログインに失敗しました。'); }
-    });
-  }
-  if (logoutBtn){
-    logoutBtn.addEventListener('click', ()=>{
-      try{
-        if (accessToken) google.accounts.oauth2.revoke(accessToken, ()=>{ accessToken=null; gapi.client.setToken(null); updateSyncBadge('ログアウト','gray'); });
-        else updateSyncBadge('ログアウト','gray');
-      }catch(e){ console.error(e); }
-    });
-  }
-  if (syncNowBtn){
-    syncNowBtn.addEventListener('click', async ()=>{
-      try{
-        await gapiLoad();
-        if (!isSignedIn()){ alert('先にGoogleログインしてください。'); return; }
-        if (!syncSettings.sheetId){ alert('Spreadsheet IDが未設定です。'); return; }
-        updateSyncBadge('同期中…','yellow');
-        await pullAndMerge();
-        await pushOutbox();
-        updateSyncBadge('同期完了','green');
-      }catch(e){ console.error(e); updateSyncBadge('同期失敗','red'); alert('同期に失敗しました。'); }
-    });
-  }
-
-  async function pullAndMerge(){
-    const sid=syncSettings.sheetId; if(!sid){ updateSyncBadge('未設定','gray'); return; }
-    const resP=await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId:sid, range:`${syncSettings.sheetProblems}!A1:Z` });
-    const { rows:cp, indexMap:cpi } = parseSheetRows(resP.result.values||[]);
-    const resD=await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId:sid, range:`${syncSettings.sheetDaily}!A1:Z` });
-    const { rows:cd, indexMap:cdi } = parseSheetRows(resD.result.values||[]);
-
-    const map=new Map(problems.map(p=>[p.id,p]));
-    cp.forEach(r=>{
-      const id=r.id; if(!id) return;
-      const c=normalizeProblem(r); const l=map.get(id);
-      if(!l) map.set(id,c);
-      else{
-        if (c.deleted && !l.deleted) map.set(id,c);
-        else if (!c.deleted && l.deleted) { /* keep local deleted */ }
-        else if (Number(c.updatedAt||0)>Number(l.updatedAt||0)) map.set(id,c);
-      }
-    });
-    problems=Array.from(map.values());
-
-    const localD={...dailyStats};
-    cd.forEach(r=>{
-      const k=r.date; if(!k) return;
-      const c=normalizeDaily(r); const l=localD[k];
-      if(!l) localD[k]=c;
-      else if (Number(c.updatedAt||0)>Number(l.updatedAt||0)) localD[k]=c;
-    });
-    dailyStats=localD;
-
-    cloudIndex={ problems:cpi, daily:cdi };
-    saveAll(); renderC(); renderD();
-  }
-  async function pushOutbox(){
-    if (!outbox.length) return;
-    const sid=syncSettings.sheetId;
-    const queue=[...outbox].sort((a,b)=>Number(a.updatedAt||0)-Number(b.updatedAt||0));
-    for (const it of queue){
-      if (it.kind==='problem'){
-        const p=problems.find(x=>x.id===it.id); if(!p) continue;
-        await upsertRow(sid, syncSettings.sheetProblems, 'id', cloudIndex.problems, p.id, denormalizeProblem(p));
-      } else if (it.kind==='daily'){
-        const k=it.date; const d=getDailyRow(k);
-        await upsertRow(sid, syncSettings.sheetDaily, 'date', cloudIndex.daily, k, denormalizeDaily(k,d));
-      }
-    }
-    outbox=[]; saveAll();
-    await pullAndMerge();
-  }
-  function parseSheetRows(values){
-    if (!values.length) return { rows:[], indexMap:{} };
-    const header=values[0]; const rows=[]; const map={};
-    for(let r=1; r<values.length; r++){
-      const row=values[r]; const obj={}; header.forEach((k,i)=>obj[k]=row[i]);
-      rows.push(obj); const pk=obj.id||obj.date; if(pk) map[pk]=r+1;
-    }
-    return { rows, indexMap:map };
-  }
-  function normalizeProblem(o){
-    return {
-      id:o.id, html:o.html||'',
-      answers:safeParseJSON(o.answers,[]),
-      categories:safeParseJSON(o.categories,[]),
-      score:Number(o.score||0), answerCount:Number(o.answerCount||0), correctCount:Number(o.correctCount||0),
-      deleted:String(o.deleted||'false')==='true',
-      createdAt:Number(o.createdAt||Date.now()), updatedAt:Number(o.updatedAt||Date.now())
-    };
-  }
-  function denormalizeProblem(p){
-    return {
-      id:p.id, html:p.html||'',
-      answers:JSON.stringify(p.answers||[]),
-      categories:JSON.stringify(p.categories||[]),
-      score:String(p.score??0), answerCount:String(p.answerCount??0), correctCount:String(p.correctCount??0),
-      deleted:String(!!p.deleted),
-      createdAt:String(p.createdAt||0), updatedAt:String(p.updatedAt||0)
-    };
-  }
-  function normalizeDaily(o){
-    return { date:o.date, correct:Number(o.correct||0), total:Number(o.total||0), ge3:Number(o.ge3||0), ge5:Number(o.ge5||0), ge10:Number(o.ge10||0), updatedAt:Number(o.updatedAt||Date.now()) };
-  }
-  function denormalizeDaily(date, d){
-    return {
-      date, correct:String(d.correct||0), total:String(d.total||0),
-      ge3:String((dailyThresholds[date]?.ge3)||0),
-      ge5:String((dailyThresholds[date]?.ge5)||0),
-      ge10:String((dailyThresholds[date]?.ge10)||0),
-      updatedAt:String(d.updatedAt||Date.now())
-    };
-  }
-  function getDailyRow(date){ return { correct: dailyStats[date]?.correct||0, total: dailyStats[date]?.total||0, updatedAt: Date.now() }; }
-  async function upsertRow(sheetId, sheetName, pkName, indexMap, key, obj){
-    const headers=Object.keys(obj), rowValues=headers.map(h=>obj[h]??''); const rowNum=indexMap[key];
-    if (rowNum){
-      const range=`${sheetName}!A${rowNum}:${colLetter(headers.length)}${rowNum}`;
-      await gapi.client.sheets.spreadsheets.values.update({ spreadsheetId:sheetId, range, valueInputOption:'RAW', resource:{ values:[rowValues] }});
-    } else {
-      const res=await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId:sheetId, range:`${sheetName}!A1:Z1` });
-      let header=(res.result.values && res.result.values[0])||[];
-      if (!header.length || !header.includes(pkName)){
-        header=headers;
-        await gapi.client.sheets.spreadsheets.values.update({
-          spreadsheetId:sheetId, range:`${sheetName}!A1:${colLetter(headers.length)}1`,
-          valueInputOption:'RAW', resource:{ values:[header] }
-        });
-      }
-      const ordered=header.map(h=>obj[h]??'');
-      await gapi.client.sheets.spreadsheets.values.append({
-        spreadsheetId:sheetId, range:`${sheetName}!A1`,
-        valueInputOption:'RAW', insertDataOption:'INSERT_ROWS', resource:{ values:[ordered] }
-      });
-    }
-  }
-  function colLetter(n){ let s=''; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); } return s; }
 
   /* ===== 初期描画 ===== */
-  // Cタブ初期レンダリング（既存の見た目そのまま）
   renderC();
-  // Dタブのグラフは表示された時に都度描画
-  document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState==='visible'){ /* 必要なら再描画 */ } });
+  // Dタブはタブ切替時に描画（renderD()）
+
+  // expose saveAll on unload too
+  window.addEventListener('beforeunload', ()=>{ saveAll(); });
 
 })();
