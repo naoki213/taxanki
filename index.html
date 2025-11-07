@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>消費税法 暗記アプリ</title>
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Chart.js（Dタブのグラフ用） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <!-- Google Identity Services（新しい認証） -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Google API client（Sheets 用） -->
+  <script src="https://apis.google.com/js/api.js"></script>
+</head>
+<body>
+  <!-- ===== 上部固定タブ（同期UIは削除） ===== -->
+  <header class="topbar">
+    <nav class="tabs">
+      <button class="tab-btn active" data-target="#tab-a">A 問題演習</button>
+      <button class="tab-btn" data-target="#tab-b">B 問題作成</button>
+      <button class="tab-btn" data-target="#tab-c">C 編集・確認</button>
+      <button class="tab-btn" data-target="#tab-d">D 記録</button>
+    </nav>
+  </header>
+
+  <main class="main">
+    <!-- ====== A: 問題演習 ====== -->
+    <section id="tab-a" class="page show">
+      <div class="card">
+        <h2>出題</h2>
+        <div class="controls">
+          <button id="startAllBtn" class="btn primary">すべてから出題</button>
+          <button id="startByCatBtn" class="btn">カテゴリから出題</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="problem-area">
+          <div id="questionContainer" class="question-container">
+            <div class="placeholder">ここに出題が表示されます。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 下部固定バー（Aタブ専用） -->
+      <div class="bottombar" id="answerBar">
+        <button id="revealBtn" class="btn primary">解答確認</button>
+        <div id="judgeBtns" class="judge hidden">
+          <button class="btn good" data-mark="o">〇</button>
+          <button class="btn neutral" data-mark="d">△</button>
+          <button class="btn bad" data-mark="x">×</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====== B: 問題作成 ====== -->
+    <section id="tab-b" class="page">
+      <div class="card">
+        <h2>問題作成</h2>
+        <div class="editor-controls">
+          <button id="maskBtn" class="btn">選択→マスク</button>
+          <button id="unmaskAllBtn" class="btn">マスク全解除</button>
+          <button id="repeatBtn" class="btn">繰り返し（直前ペースト）</button>
+          <button id="clearDraftBtn" class="btn">消去</button>
+        </div>
+
+        <div id="editor" class="editor" contenteditable="true" spellcheck="false"
+             placeholder="ここに長文をペーストし、問題にしたい箇所を選択→「選択→マスク」を押してください。複数箇所OK。"></div>
+
+        <div class="row">
+          <label for="catInput">カテゴリ（カンマ区切りで複数可）：</label>
+          <input id="catInput" type="text" class="input" placeholder="例：消費税法, 理論/総論, 軽減税率" />
+        </div>
+
+        <div class="row right">
+          <button id="saveProblemBtn" class="btn primary">保存（Cに追加 & 同期キュー）</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====== C: 編集・確認（＋同期UIをここに集約） ====== -->
+    <section id="tab-c" class="page">
+      <div class="card">
+        <h2>Google 同期</h2>
+        <div class="row wrap" style="align-items:center">
+          <span id="syncBadge" class="badge badge-gray">未初期化</span>
+          <button id="loginBtn" class="btn small">Googleログイン</button>
+          <button id="logoutBtn" class="btn small outline">ログアウト</button>
+          <button id="syncNowBtn" class="btn small primary">今すぐ同期</button>
+        </div>
+        <details class="sync-settings" id="syncSettingsDetails">
+          <summary>同期設定</summary>
+          <div class="sync-panel">
+            <label>Spreadsheet ID
+              <input id="sheetIdInput" class="input" placeholder="1AbCdEf...（URLのID）" />
+            </label>
+            <div class="row gap">
+              <label>Problems シート名 <input id="sheetProblemsInput" class="input" value="Problems" /></label>
+              <label>Daily シート名 <input id="sheetDailyInput" class="input" value="Daily" /></label>
+            </div>
+            <button id="saveSyncSettingsBtn" class="btn">保存</button>
+            <div class="muted">※ シートの1行目にヘッダが必要です（下の「シート準備」参照）。</div>
+          </div>
+        </details>
+        <details class="sync-settings">
+          <summary>シート準備（初回のみ）</summary>
+          <div class="sync-panel">
+            <p>各シートの1行目に以下のヘッダを作成してください。</p>
+            <p><b>Problems</b>：id, html, answers, categories, score, answerCount, correctCount, deleted, createdAt, updatedAt</p>
+            <p><b>Daily</b>：date, correct, total, ge3, ge5, ge10, updatedAt</p>
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
+        <h2>編集・確認</h2>
+        <div class="row wrap">
+          <div class="chips" id="catChips"></div>
+          <button id="clearCatFilterBtn" class="btn">カテゴリ絞り込み解除</button>
+        </div>
+
+        <div class="row gap">
+          <button id="exportJsonBtn" class="btn">エクスポート（JSON）</button>
+          <label class="btn">
+            インポート（JSON）
+            <input id="importJsonInput" type="file" accept="application/json" hidden />
+          </label>
+        </div>
+
+        <div id="problemList" class="problem-list"></div>
+      </div>
+    </section>
+
+    <!-- ====== D: 記録 ====== -->
+    <section id="tab-d" class="page">
+      <div class="card">
+        <h2>進捗グラフ（スコア到達数）</h2>
+        <div style="height:220px"><canvas id="progressChart"></canvas></div>
+      </div>
+
+      <div class="card">
+        <h2>日別記録（正答/回答）</h2>
+        <div id="dailyList" class="daily-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== カテゴリ選択モーダル（Aタブ用） ===== -->
+  <div id="catModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-content">
+      <h3>カテゴリを選択</h3>
+      <div id="catModalBody" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="catModalCancel" class="btn">キャンセル</button>
+        <button id="catModalStart" class="btn primary">このカテゴリで出題</button>
+      </div>
+    </div>
+    <div class="modal-backdrop"></div>
+  </div>
+
+  <!-- ===== Cタブ詳細編集モーダル ===== -->
+  <div id="editModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-content large">
+      <h3>問題編集</h3>
+      <div class="row">
+        <label>カテゴリ（カンマ区切り）：</label>
+        <input id="editCatInput" type="text" class="input" />
+      </div>
+      <div class="editor-controls">
+        <button id="editMaskBtn" class="btn">選択→マスク</button>
+        <button id="editUnmaskAllBtn" class="btn">マスク全解除</button>
+      </div>
+      <div id="editEditor" class="editor" contenteditable="true" spellcheck="false"></div>
+      <div class="row space">
+        <div class="muted" id="editMeta"></div>
+        <div class="modal-actions">
+          <button id="editCancelBtn" class="btn">閉じる</button>
+          <button id="editSaveBtn" class="btn primary">保存</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-backdrop"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
