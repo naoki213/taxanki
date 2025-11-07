@@ -9,11 +9,6 @@
 
   <!-- Chart.js（Dタブのグラフ用） -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-
-  <!-- Google Identity Services（新しい認証） -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google API client（Sheets 用） -->
-  <script src="https://apis.google.com/js/api.js"></script>
 </head>
 <body>
   <!-- ===== 上部固定タブ（同期UIは削除） ===== -->
@@ -76,45 +71,13 @@
         </div>
 
         <div class="row right">
-          <button id="saveProblemBtn" class="btn primary">保存（Cに追加 & 同期キュー）</button>
+          <button id="saveProblemBtn" class="btn primary">保存（Cに追加）</button>
         </div>
       </div>
     </section>
 
-    <!-- ====== C: 編集・確認（＋同期UIをここに集約） ====== -->
+    <!-- ====== C: 編集・確認 ====== -->
     <section id="tab-c" class="page">
-      <div class="card">
-        <h2>Google 同期</h2>
-        <div class="row wrap" style="align-items:center">
-          <span id="syncBadge" class="badge badge-gray">未初期化</span>
-          <button id="loginBtn" class="btn small">Googleログイン</button>
-          <button id="logoutBtn" class="btn small outline">ログアウト</button>
-          <button id="syncNowBtn" class="btn small primary">今すぐ同期</button>
-        </div>
-        <details class="sync-settings" id="syncSettingsDetails">
-          <summary>同期設定</summary>
-          <div class="sync-panel">
-            <label>Spreadsheet ID
-              <input id="sheetIdInput" class="input" placeholder="1AbCdEf...（URLのID）" />
-            </label>
-            <div class="row gap">
-              <label>Problems シート名 <input id="sheetProblemsInput" class="input" value="Problems" /></label>
-              <label>Daily シート名 <input id="sheetDailyInput" class="input" value="Daily" /></label>
-            </div>
-            <button id="saveSyncSettingsBtn" class="btn">保存</button>
-            <div class="muted">※ シートの1行目にヘッダが必要です（下の「シート準備」参照）。</div>
-          </div>
-        </details>
-        <details class="sync-settings">
-          <summary>シート準備（初回のみ）</summary>
-          <div class="sync-panel">
-            <p>各シートの1行目に以下のヘッダを作成してください。</p>
-            <p><b>Problems</b>：id, html, answers, categories, score, answerCount, correctCount, deleted, createdAt, updatedAt</p>
-            <p><b>Daily</b>：date, correct, total, ge3, ge5, ge10, updatedAt</p>
-          </div>
-        </details>
-      </div>
-
       <div class="card">
         <h2>編集・確認</h2>
         <div class="row wrap">
@@ -137,8 +100,8 @@
     <!-- ====== D: 記録 ====== -->
     <section id="tab-d" class="page">
       <div class="card">
-        <h2>進捗グラフ（スコア到達数）</h2>
-        <div style="height:220px"><canvas id="progressChart"></canvas></div>
+        <h2>進捗グラフ（カテゴリ別正答率）</h2>
+        <div style="height:260px"><canvas id="progressChart"></canvas></div>
       </div>
 
       <div class="card">
