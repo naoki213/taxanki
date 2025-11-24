@@ -1,7 +1,8 @@
 /* ======================================================
-   消費税法 暗記アプリ（同期機能廃止版）
+   消費税法 暗記アプリ（同期機能廃止版 + カテゴリ別エクスポート）
    - Chart.js を用いてカテゴリごとの正答率を表示
    - 日別の正答/回答を localStorage にて保存（直近30日表示）
+   - Cタブのカテゴリ選択に応じた部分エクスポート対応
    ====================================================== */
 (() => {
   /* ===== LocalStorage Keys ===== */
@@ -40,8 +41,8 @@
     lastSavedHTML: "",
     lastSavedCats: [],
   });
-  let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {}); // { "YYYY-MM-DD": { correct: n, total: n } }
-  let categoryStats = loadJSON(LS_KEYS.CATEGORY_STATS, {}); // { "カテゴリ名": { correct: n, total: n } }
+  let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {});
+  let categoryStats = loadJSON(LS_KEYS.CATEGORY_STATS, {});
 
   /* ===== DOM 取得 ===== */
   const $ = (s)=>document.querySelector(s);
@@ -102,7 +103,6 @@
     if (range.collapsed) return;
     if (!rootEditable.contains(range.commonAncestorContainer)) return;
 
-    // 既存マスク上の選択なら解除（トグル）
     let anc = range.commonAncestorContainer.nodeType===1?range.commonAncestorContainer:range.commonAncestorContainer.parentElement;
     const inMask = anc && anc.closest && anc.closest('.mask');
     if (inMask) {
@@ -168,11 +168,9 @@
       saveAll();
     },0));
 
-    // 既存ボタン（残す）
     if (maskBtn) maskBtn.addEventListener('click', ()=>toggleMaskSelection(editor));
     if (unmaskAllBtn) unmaskAllBtn.addEventListener('click', ()=>unmaskAllIn(editor));
 
-    // 選択→即マスク（誤作動防止のため少し遅延）
     ['mouseup','keyup','touchend'].forEach(ev=>{
       editor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editor), 10));
     });
@@ -204,7 +202,6 @@
       const categories = parseCategories(catInput?catInput.value:'');
       const now=Date.now(); const id=uuid();
       problems.push({ id, html, answers, categories, score:0, answerCount:0, correctCount:0, deleted:false, createdAt:now, updatedAt:now });
-      // 繰り返し用に覚える
       appState.lastSavedHTML = html;
       appState.lastSavedCats = categories;
       saveAll();
@@ -274,12 +271,32 @@
     }
   }
 
+  /* ===== Cタブ：カテゴリ選択エクスポート ===== */
   if (exportJsonBtn) exportJsonBtn.addEventListener('click', ()=>{
-    const blob=new Blob([JSON.stringify({problems,dailyStats,categoryStats},null,2)],{type:'application/json'});
-    const url=URL.createObjectURL(blob);
-    const d=new Date(); const name=`anki_export_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.json`;
-    const a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url);
+    // 選択したカテゴリ
+    const selectedCats = Array.from(catChips.querySelectorAll('input[type=checkbox]:checked')).map(cb=>cb.value);
+    if (selectedCats.length === 0) {
+      if (!confirm('カテゴリが選択されていません。全ての問題をエクスポートしますか？')) return;
+    }
+
+    const filteredProblems = problems.filter(p => 
+      !p.deleted && (selectedCats.length===0 ? true : (p.categories||[]).some(c=>selectedCats.includes(c)))
+    );
+
+    const blob = new Blob([JSON.stringify({
+      problems: filteredProblems,
+      dailyStats,
+      categoryStats
+    }, null, 2)], { type:'application/json' });
+
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const name = `export_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}.json`;
+    const a = document.createElement('a'); a.href=url; a.download=name; a.click();
+    URL.revokeObjectURL(url);
+    alert(`選択したカテゴリ (${selectedCats.join(', ') || '全て'}) の問題をエクスポートしました。`);
   });
+
   if (importJsonInput) importJsonInput.addEventListener('change', async (e)=>{
     const file=e.target.files?.[0]; if(!file) return;
     try{
@@ -334,7 +351,6 @@
       editEditor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editEditor), 10));
     });
   }
-  // バックドロップ閉じ
   document.querySelectorAll('.modal .modal-backdrop').forEach(bg=>{
     bg.addEventListener('click', ()=>{
       if (catModal && !catModal.classList.contains('hidden')){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); }
@@ -377,17 +393,16 @@
 
   function startSession(categories){
     let ids = problems.filter(p=>!p.deleted && (categories ? (p.categories||[]).some(c=>categories.includes(c)) : true)).map(p=>p.id);
-    if (!ids.length){ alert('出題できる問題がありません。Bタブで作成してください。'); return; }
+    if (!ids.length){ alert('出題できる問題がありません。Bタブで作成してください。 return; }
     currentPool=ids; currentId=null; appState.recentQueue=[];
     setReveal(false); renderQuestion(nextQuestionId());
   }
 
-  // Aタブ：.mask 個別タップでその部分だけ表示（全体表示中は無効）
   if (questionContainer){
     questionContainer.addEventListener('click', (e)=>{
       const m = e.target.closest && e.target.closest('.mask');
       if (!m) return;
-      if (isRevealed) return;       // 全表示中は個別トグルしない
+      if (isRevealed) return;
       m.classList.toggle('peek');
     });
   }
@@ -419,7 +434,9 @@
     currentId=id; questionContainer.innerHTML=p.html||'<div class="placeholder">本文なし</div>';
     questionContainer.scrollTop=0; setReveal(false);
   }
-  const weightOf = (p)=>1/(1+Math.max(0,p.score||0)); // シンプル重み
+
+  const weightOf = (p)=>1/(1+Math.max(0,p.score||0));
+
   function nextQuestionId(){
     appState.forcedQueue.forEach(it=>it.delay--);
     const idx=appState.forcedQueue.findIndex(it=>it.delay<=0);
@@ -432,7 +449,7 @@
     const recent=new Set(appState.recentQueue);
     const cand=currentPool.filter(id=>!recent.has(id));
     const list=cand.length?cand:currentPool;
-    const items=list.map(id=>({id, w: weightOf(problems.find(x=>x.id===id)||{})}));
+    const items=list.map(id=>({id, w: weightOf(problems.find(x=>x.id=id)||{})}));
     const total=items.reduce((s,x)=>s+x.w,0);
     let r=Math.random()*total;
     for(const it of items){ if((r-=it.w)<=0){ appState.recentQueue.push(it.id); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return it.id; } }
@@ -440,7 +457,6 @@
     appState.recentQueue.push(fb); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return fb;
   }
 
-  // grading: update problem score, dailyStats, categoryStats
   function gradeCurrent(mark){
     const p=problems.find(x=>x.id===currentId); if(!p) return;
     let d=0; if(mark==='o') d=+1; else if(mark==='d') d=-0.5; else if(mark==='x') d=-1;
@@ -449,13 +465,11 @@
     p.updatedAt=Date.now();
     if (mark==='x') appState.forcedQueue.push({ id:p.id, delay:5 });
 
-    // --- daily stats ---
     const dk = todayKey();
     if (!dailyStats[dk]) dailyStats[dk] = { correct:0, total:0 };
     dailyStats[dk].total += 1;
     if (mark==='o') dailyStats[dk].correct += 1;
 
-    // --- category stats: attribute this attempt to all categories of the problem ---
     (p.categories||[]).forEach(cat=>{
       if (!categoryStats[cat]) categoryStats[cat] = { correct:0, total:0 };
       categoryStats[cat].total += 1;
@@ -463,11 +477,11 @@
     });
 
     saveAll();
-    renderD(); // reflect stats immediately
+    renderD();
     renderQuestion(nextQuestionId());
   }
 
-  /* ===== D：記録（カテゴリ別グラフ + 日別履歴） ===== */
+  /* ===== D：記録 ===== */
   let progressChart = null;
 
   function renderD(){
@@ -477,12 +491,11 @@
 
   function renderCategoryChart(){
     if (!progressCanvas || !window.Chart) return;
-    // prepare data
     const cats = Object.keys(categoryStats).sort((a,b)=>a.localeCompare(b,'ja'));
     const labels = cats.length?cats:['(データなし)'];
     const rates = cats.map(c=>{
       const s = categoryStats[c] || { correct:0, total:0 };
-      return s.total? Math.round((s.correct / s.total) * 1000)/10 : 0; // 百分率（小数1位）
+      return s.total? Math.round((s.correct / s.total) * 1000)/10 : 0;
     });
     const data = { labels, datasets: [{ label: '正答率（%）', data: rates }] };
     const options = {
@@ -497,32 +510,23 @@
   function renderDailyList(){
     if (!dailyList) return;
     dailyList.innerHTML = '';
-    // get last 30 days keys (even if empty days we can show 0/0 if desired)
-    const entries = Object.entries(dailyStats).sort((a,b)=>a[0].localeCompare(b[0],'ja'));
-    // filter to last 30 days
     const today = new Date();
-    const days = [];
     for(let i=0;i<30;i++){
       const d = new Date(today);
       d.setDate(d.getDate() - i);
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      days.push(key);
-    }
-    days.forEach(k=>{
-      const v = dailyStats[k] || { correct:0, total:0 };
+      const v = dailyStats[key] || { correct:0, total:0 };
       const row = document.createElement('div'); row.className = 'daily-item';
-      const left = document.createElement('div'); left.textContent = k;
+      const left = document.createElement('div'); left.textContent = key;
       const right = document.createElement('div'); right.textContent = `${v.correct} / ${v.total}`;
       row.appendChild(left); row.appendChild(right);
       dailyList.appendChild(row);
-    });
+    }
   }
 
   /* ===== 初期描画 ===== */
   renderC();
-  // Dタブはタブ切替時に描画（renderD()）
 
-  // expose saveAll on unload too
   window.addEventListener('beforeunload', ()=>{ saveAll(); });
 
 })();
