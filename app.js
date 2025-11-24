@@ -393,7 +393,11 @@
 
   function startSession(categories){
     let ids = problems.filter(p=>!p.deleted && (categories ? (p.categories||[]).some(c=>categories.includes(c)) : true)).map(p=>p.id);
-    if (!ids.length){ alert('出題できる問題がありません。Bタブで作成してください。 return; }
+   if (!ids.length){ 
+  alert('出題できる問題がありません。Bタブで作成してください。'); 
+  return; 
+}
+
     currentPool=ids; currentId=null; appState.recentQueue=[];
     setReveal(false); renderQuestion(nextQuestionId());
   }
