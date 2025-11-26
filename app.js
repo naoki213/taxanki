@@ -1000,3 +1000,25 @@
     saveAppState();
   });
 })();
+
+
+function getLocalStorageUsage() {
+  let total = 0;
+  for (let key in localStorage) {
+    if (localStorage.hasOwnProperty(key)) {
+      const val = localStorage.getItem(key);
+      total += key.length + (val ? val.length : 0);
+    }
+  }
+  return total;
+}
+
+function formatBytes(bytes) {
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb.toFixed(2) + " KB";
+  return (kb / 1024).toFixed(2) + " MB";
+}
+
+// 一般的な localStorage 容量の目安（5MB）
+const LOCALSTORAGE_LIMIT = 5 * 1024 * 1024;
+
