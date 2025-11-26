@@ -176,15 +176,7 @@
   // デバウンス
   function debounce(fn, wait=300){ let t; return ()=>{ clearTimeout(t); t=setTimeout(()=>fn(), wait); }; }
   const saveProblemsDebounced = debounce(saveProblemsMeta, 400);
-  const saveAppStateDebounced = debounce(saveAppState, 200);
-
-  // 露出用（必要箇所のみで呼ぶ）
-  const saveAppStateDebouncedImmediate = saveAppStateDebounced;
-  const saveAppStateDebounced = saveAppStateDebounced; // alias to use elsewhere
-
-  if (saveProblemBtn){
-    saveProblemBtn.addEventListener('click', async ()=>{
-      if (!editor) return; const html = sanitizeHTML(editor.innerHTML.trim()); if (!html){ alert('長文を入力してください。'); return; }
+  // Removed duplicate saveAppStateDebounced definition (handled by optimized save system) const html = sanitizeHTML(editor.innerHTML.trim()); if (!html){ alert('長文を入力してください。'); return; }
       const answers = extractAnswersFrom(editor);
       if (answers.length===0 && !confirm('マスクがありません。保存しますか？')) return;
       const categories = parseCategories(catInput?catInput.value:'');
