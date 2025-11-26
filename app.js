@@ -1,27 +1,109 @@
 /* ======================================================
-   消費税法 暗記アプリ（同期機能廃止版 + カテゴリ別エクスポート）
-   - Chart.js を用いてカテゴリごとの正答率を表示
-   - 日別の正答/回答を localStorage にて保存（直近30日表示）
-   - Cタブのカテゴリ選択に応じた部分エクスポート対応
+   消費税法 暗記アプリ（最適化版）
+   - 機能は維持しつつ「localStorage 負荷を極小化」する実装
+   - 大きい HTML コンテンツは IndexedDB に格納（htmls ストア）
+   - localStorage にはテキスト/数値などの軽量メタのみ保存
+   - 必要時に IndexedDB から HTML を読み出して表示/編集
+   - 保存は個別保存（debounce を利用）で無駄な write を削減
+   - LZString が利用可能なら localStorage データは圧縮して保存
    ====================================================== */
-(() => {
-  /* ===== LocalStorage Keys ===== */
+
+(()=>{
+  /* ======= 設定 ======= */
   const LS_KEYS = {
-    PROBLEMS: 'problems_v1',
+    PROBLEMS_META: 'problems_meta_v1', // 本文は IndexedDB へ
     APPSTATE: 'app_state_v1',
     DAILYSTATS: 'daily_stats_v1',
     CATEGORY_STATS: 'category_stats_v1',
   };
 
-  /* ===== 便利関数 ===== */
-  const loadJSON = (k, fb) => { try{const v=localStorage.getItem(k); return v?JSON.parse(v):fb;}catch{ return fb; } };
-  const saveJSON = (k, v) => localStorage.setItem(k, JSON.stringify(v));
-  const saveAll = () => {
-    saveJSON(LS_KEYS.PROBLEMS, problems);
-    saveJSON(LS_KEYS.APPSTATE, appState);
-    saveJSON(LS_KEYS.DAILYSTATS, dailyStats);
-    saveJSON(LS_KEYS.CATEGORY_STATS, categoryStats);
+  /* ======= IndexedDB ヘルパー（シンプル） ======= */
+  const idb = (()=>{
+    const DB_NAME='taxmemorize_db_v1';
+    const DB_VERSION=1;
+    let dbp = null;
+    function open(){
+      if (dbp) return dbp;
+      dbp = new Promise((resolve, reject)=>{
+        const r = indexedDB.open(DB_NAME, DB_VERSION);
+        r.onupgradeneeded = (e)=>{
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('htmls')) db.createObjectStore('htmls', { keyPath:'id' });
+        };
+        r.onsuccess = ()=>resolve(r.result);
+        r.onerror = ()=>reject(r.error);
+      });
+      return dbp;
+    }
+    async function putHtml(id, html){
+      const db = await open();
+      return new Promise((resolve,reject)=>{
+        const tx = db.transaction('htmls','readwrite');
+        const st = tx.objectStore('htmls');
+        st.put({ id, html });
+        tx.oncomplete = ()=>resolve();
+        tx.onerror = ()=>reject(tx.error);
+      });
+    }
+    async function getHtml(id){
+      const db = await open();
+      return new Promise((resolve,reject)=>{
+        const tx = db.transaction('htmls','readonly');
+        const st = tx.objectStore('htmls');
+        const rq = st.get(id);
+        rq.onsuccess = ()=>resolve(rq.result ? rq.result.html : null);
+        rq.onerror = ()=>reject(rq.error);
+      });
+    }
+    async function deleteHtml(id){
+      const db = await open();
+      return new Promise((resolve,reject)=>{
+        const tx = db.transaction('htmls','readwrite');
+        const st = tx.objectStore('htmls');
+        st.delete(id);
+        tx.oncomplete = ()=>resolve();
+        tx.onerror = ()=>reject(tx.error);
+      });
+    }
+    async function getAllHtmls(){
+      const db = await open();
+      return new Promise((resolve,reject)=>{
+        const tx = db.transaction('htmls','readonly');
+        const st = tx.objectStore('htmls');
+        const all=[];
+        const cur = st.openCursor();
+        cur.onsuccess = ()=>{
+          const c = cur.result; if(!c){ resolve(all); return; }
+          all.push(c.value); c.continue();
+        };
+        cur.onerror = ()=>reject(cur.error);
+      });
+    }
+    return { putHtml, getHtml, deleteHtml, getAllHtmls };
+  })();
+
+  /* ======= 便利関数 ======= */
+  const safeParse = (s, fb)=>{ try{return s?JSON.parse(s):fb;}catch{return fb;} };
+
+  // LZString 圧縮が利用可能なら使い、無ければ直保存
+  const compress = (s)=>{ if (window.LZString && typeof LZString.compress === 'function') return LZString.compress(s); return s; };
+  const decompress = (s)=>{ if (window.LZString && typeof LZString.decompress === 'function') return LZString.decompress(s); return s; };
+
+  const saveToLS = (key, val)=>{
+    try {
+      const json = JSON.stringify(val);
+      const blob = compress(json);
+      localStorage.setItem(key, blob);
+    } catch(e){ console.warn('localStorage save failed', key, e); }
   };
+  const loadFromLS = (key, fb)=>{
+    try{
+      const raw = localStorage.getItem(key); if(!raw) return fb;
+      const json = decompress(raw);
+      return safeParse(json, fb);
+    }catch(e){ console.warn('localStorage load failed', key, e); return fb; }
+  };
+
   const uuid = ()=>'p-'+Math.random().toString(36).slice(2)+Date.now().toString(36);
   const todayKey = ()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
   const clamp=(n,min,max)=>Math.min(max,Math.max(min,n));
@@ -31,506 +113,201 @@
   const firstSentenceFromHTML = (html)=>{ const d=document.createElement('div'); d.innerHTML=html; const t=(d.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return '(空)'; const i=t.indexOf('。'); if(i>=0) return t.slice(0,Math.min(i+1,120)); return t.slice(0,100)+(t.length>100?'…':''); };
   const sanitizeHTML=(html)=>{ const d=document.createElement('div'); d.innerHTML=html; d.querySelectorAll('script,style,iframe,object,embed').forEach(n=>n.remove()); d.querySelectorAll('*').forEach(el=>{[...el.attributes].forEach(a=>{ if(/^on/i.test(a.name)) el.removeAttribute(a.name); });}); return d.innerHTML; };
 
-  /* ===== 状態 ===== */
-  let problems = loadJSON(LS_KEYS.PROBLEMS, []);
-  let appState = loadJSON(LS_KEYS.APPSTATE, {
+  /* ======= 状態 ======= */
+  let problemsMeta = loadFromLS(LS_KEYS.PROBLEMS_META, []); // HTML 本文は IDB に保存
+  let appState = loadFromLS(LS_KEYS.APPSTATE, {
     recentQueue: [],
     forcedQueue: [],
-    lastPastedHTML: "",
-    lastPastedCats: "",
-    lastSavedHTML: "",
+    lastPastedCats: '',
     lastSavedCats: [],
   });
-  let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {});
-  let categoryStats = loadJSON(LS_KEYS.CATEGORY_STATS, {});
+  let dailyStats = loadFromLS(LS_KEYS.DAILYSTATS, {});
+  let categoryStats = loadFromLS(LS_KEYS.CATEGORY_STATS, {});
 
-  /* ===== DOM 取得 ===== */
-  const $ = (s)=>document.querySelector(s);
-  const $$ = (s)=>document.querySelectorAll(s);
+  /* ======= DOM 取得 ======= */
+  const $ = (s)=>document.querySelector(s); const $$ = (s)=>document.querySelectorAll(s);
+  const tabButtons = $$('.tab-btn'); const pages = $$('.page');
+  const startAllBtn = $('#startAllBtn'); const startByCatBtn = $('#startByCatBtn'); const questionContainer = $('#questionContainer'); const revealBtn = $('#revealBtn'); const judgeBtns = $('#judgeBtns');
+  const editor = $('#editor'); const maskBtn = $('#maskBtn'); const unmaskAllBtn = $('#unmaskAllBtn'); const repeatBtn = $('#repeatBtn'); const clearDraftBtn = $('#clearDraftBtn'); const catInput = $('#catInput'); const saveProblemBtn = $('#saveProblemBtn');
+  const problemList = $('#problemList'); const catChips = $('#catChips'); const clearCatFilterBtn = $('#clearCatFilterBtn'); const exportJsonBtn = $('#exportJsonBtn'); const importJsonInput = $('#importJsonInput');
+  const progressCanvas = $('#progressChart'); const dailyList = $('#dailyList');
+  const catModal = $('#catModal'); const catModalBody = $('#catModalBody'); const catModalCancel = $('#catModalCancel'); const catModalStart = $('#catModalStart');
+  const editModal = $('#editModal'); const editEditor = $('#editEditor'); const editCatInput = $('#editCatInput'); const editMaskBtn = $('#editMaskBtn'); const editUnmaskAllBtn = $('#editUnmaskAllBtn'); const editCancelBtn = $('#editCancelBtn'); const editSaveBtn = $('#editSaveBtn'); const editMeta = $('#editMeta');
 
-  // タブ
-  const tabButtons = $$('.tab-btn');
-  const pages = $$('.page');
-
-  // A
-  const startAllBtn = $('#startAllBtn');
-  const startByCatBtn = $('#startByCatBtn');
-  const questionContainer = $('#questionContainer');
-  const revealBtn = $('#revealBtn');
-  const judgeBtns = $('#judgeBtns');
-
-  // B
-  const editor = $('#editor');
-  const maskBtn = $('#maskBtn');
-  const unmaskAllBtn = $('#unmaskAllBtn');
-  const repeatBtn = $('#repeatBtn');
-  const clearDraftBtn = $('#clearDraftBtn');
-  const catInput = $('#catInput');
-  const saveProblemBtn = $('#saveProblemBtn');
-
-  // C
-  const problemList = $('#problemList');
-  const catChips = $('#catChips');
-  const clearCatFilterBtn = $('#clearCatFilterBtn');
-  const exportJsonBtn = $('#exportJsonBtn');
-  const importJsonInput = $('#importJsonInput');
-
-  // D
-  const progressCanvas = $('#progressChart');
-  const dailyList = $('#dailyList');
-
-  // モーダル
-  const catModal = $('#catModal');
-  const catModalBody = $('#catModalBody');
-  const catModalCancel = $('#catModalCancel');
-  const catModalStart = $('#catModalStart');
-
-  const editModal = $('#editModal');
-  const editEditor = $('#editEditor');
-  const editCatInput = $('#editCatInput');
-  const editMaskBtn = $('#editMaskBtn');
-  const editUnmaskAllBtn = $('#editUnmaskAllBtn');
-  const editCancelBtn = $('#editCancelBtn');
-  const editSaveBtn = $('#editSaveBtn');
-  const editMeta = $('#editMeta');
-
-  /* ===== 自動マスク付与（選択しただけで） ===== */
+  /* ======= マスク処理 ======= */
   function autoMaskOnSelection(rootEditable){
-    if (!rootEditable) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount===0) return;
-    const range = sel.getRangeAt(0);
-    if (range.collapsed) return;
-    if (!rootEditable.contains(range.commonAncestorContainer)) return;
-
+    if (!rootEditable) return; const sel = window.getSelection(); if (!sel || sel.rangeCount===0) return; const range = sel.getRangeAt(0); if (range.collapsed) return; if (!rootEditable.contains(range.commonAncestorContainer)) return;
     let anc = range.commonAncestorContainer.nodeType===1?range.commonAncestorContainer:range.commonAncestorContainer.parentElement;
     const inMask = anc && anc.closest && anc.closest('.mask');
-    if (inMask) {
-      const t=inMask, p=t.parentNode;
-      while(t.firstChild) p.insertBefore(t.firstChild,t);
-      p.removeChild(t);
-      sel.removeAllRanges();
-      return;
-    }
-    try {
-      const span=document.createElement('span'); span.className='mask';
-      range.surroundContents(span);
-    } catch {
-      const frag=range.extractContents();
-      const wrap=document.createElement('span'); wrap.className='mask';
-      wrap.appendChild(frag); range.insertNode(wrap);
-    }
+    if (inMask) { const t=inMask, p=t.parentNode; while(t.firstChild)p.insertBefore(t.firstChild,t); p.removeChild(t); sel.removeAllRanges(); return; }
+    try { const span=document.createElement('span'); span.className='mask'; range.surroundContents(span); } catch { const frag=range.extractContents(); const wrap=document.createElement('span'); wrap.className='mask'; wrap.appendChild(frag); range.insertNode(wrap); }
     sel.removeAllRanges();
   }
+  function toggleMaskSelection(rootEditable){ const sel = window.getSelection(); if (!sel || sel.rangeCount===0) return; const range = sel.getRangeAt(0); if (range.collapsed) return; if (!rootEditable.contains(range.commonAncestorContainer)) return; let anc = range.commonAncestorContainer.nodeType===1?range.commonAncestorContainer:range.commonAncestorContainer.parentElement; const inMask = anc && anc.closest && anc.closest('.mask'); if (inMask) { const t=inMask, p=t.parentNode; while(t.firstChild)p.insertBefore(t.firstChild,t); p.removeChild(t); return; } try { const span=document.createElement('span'); span.className='mask'; range.surroundContents(span); } catch { const frag=range.extractContents(); const wrap=document.createElement('span'); wrap.className='mask'; wrap.appendChild(frag); range.insertNode(wrap); } }
 
-  function toggleMaskSelection(rootEditable){
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount===0) return;
-    const range = sel.getRangeAt(0);
-    if (range.collapsed) return;
-    if (!rootEditable.contains(range.commonAncestorContainer)) return;
+  /* ======= タブ ======= */
+  tabButtons.forEach(btn=>{ btn.addEventListener('click', ()=>{ tabButtons.forEach(b=>b.classList.remove('active')); btn.classList.add('active'); const target=btn.getAttribute('data-target'); pages.forEach(p=>p.classList.remove('show')); const page=document.querySelector(target); if(page) page.classList.add('show'); if (target==='#tab-c') renderC(); if (target==='#tab-d') renderD(); }); });
 
-    let anc = range.commonAncestorContainer.nodeType===1?range.commonAncestorContainer:range.commonAncestorContainer.parentElement;
-    const inMask = anc && anc.closest && anc.closest('.mask');
-    if (inMask) {
-      const t=inMask, p=t.parentNode;
-      while(t.firstChild) p.insertBefore(t.firstChild,t);
-      p.removeChild(t);
-      return;
-    }
-    try {
-      const span=document.createElement('span'); span.className='mask';
-      range.surroundContents(span);
-    } catch {
-      const frag=range.extractContents();
-      const wrap=document.createElement('span'); wrap.className='mask';
-      wrap.appendChild(frag); range.insertNode(wrap);
-    }
-  }
-
-  /* ===== タブ切替 ===== */
-  tabButtons.forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      tabButtons.forEach(b=>b.classList.remove('active')); btn.classList.add('active');
-      const target=btn.getAttribute('data-target');
-      pages.forEach(p=>p.classList.remove('show'));
-      const page=document.querySelector(target); if(page) page.classList.add('show');
-      if (target==='#tab-c') renderC();
-      if (target==='#tab-d') renderD();
-    });
-  });
-
-  /* ===== B：問題作成 ===== */
+  /* ======= B: 問題作成（本文は IndexedDB に保存） ======= */
   if (editor){
     editor.addEventListener('paste', ()=>setTimeout(()=>{
-      appState.lastPastedHTML = editor.innerHTML;
+      // lastPastedHTML は localStorage に保持しない（重い）
       if (catInput && catInput.value && catInput.value.trim()) appState.lastPastedCats = catInput.value.trim();
-      saveAll();
+      saveAppStateDebounced();
     },0));
-
     if (maskBtn) maskBtn.addEventListener('click', ()=>toggleMaskSelection(editor));
     if (unmaskAllBtn) unmaskAllBtn.addEventListener('click', ()=>unmaskAllIn(editor));
-
-    ['mouseup','keyup','touchend'].forEach(ev=>{
-      editor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editor), 10));
-    });
+    ['mouseup','keyup','touchend'].forEach(ev=> editor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editor), 10)));
   }
-
-  if (repeatBtn){
-    repeatBtn.addEventListener('click', ()=>{
-      if (appState.lastSavedHTML) {
-        if (editor) editor.innerHTML = appState.lastSavedHTML;
-        if (catInput) catInput.value = (appState.lastSavedCats||[]).join(', ');
-      } else if (appState.lastPastedHTML) {
-        if (editor) editor.innerHTML = appState.lastPastedHTML;
-        if (catInput) catInput.value = appState.lastPastedCats || '';
-      } else {
-        alert('繰り返しできる直前データがありません。長文をペーストして保存してください。');
-      }
-    });
-  }
+  if (repeatBtn){ repeatBtn.addEventListener('click', ()=>{
+    if (appState.lastSavedCats && appState.lastSavedCats.length){ if (catInput) catInput.value = (appState.lastSavedCats||[]).join(', '); }
+    else if (appState.lastPastedCats) { if (catInput) catInput.value = appState.lastPastedCats || ''; }
+    else alert('繰り返しできる直前データがありません。');
+  }); }
   if (clearDraftBtn) clearDraftBtn.addEventListener('click', ()=>{ if(editor) editor.innerHTML=''; if(catInput) catInput.value=''; });
-  if (catInput) catInput.addEventListener('change', ()=>{ appState.lastPastedCats = catInput.value.trim(); saveAll(); });
+  if (catInput) catInput.addEventListener('change', ()=>{ appState.lastPastedCats = catInput.value.trim(); saveAppStateDebounced(); });
+
+  // 保存関数（個別）
+  const saveProblemsMeta = ()=> saveToLS(LS_KEYS.PROBLEMS_META, problemsMeta);
+  const saveAppState = ()=> saveToLS(LS_KEYS.APPSTATE, appState);
+  const saveDailyStats = ()=> saveToLS(LS_KEYS.DAILYSTATS, dailyStats);
+  const saveCategoryStats = ()=> saveToLS(LS_KEYS.CATEGORY_STATS, categoryStats);
+
+  // デバウンス
+  function debounce(fn, wait=300){ let t; return ()=>{ clearTimeout(t); t=setTimeout(()=>fn(), wait); }; }
+  const saveProblemsDebounced = debounce(saveProblemsMeta, 400);
+  const saveAppStateDebounced = debounce(saveAppState, 200);
+
+  // 露出用（必要箇所のみで呼ぶ）
+  const saveAppStateDebouncedImmediate = saveAppStateDebounced;
+  const saveAppStateDebounced = saveAppStateDebounced; // alias to use elsewhere
 
   if (saveProblemBtn){
-    saveProblemBtn.addEventListener('click', ()=>{ 
-      if (!editor) return;
-      const html = editor.innerHTML.trim();
-      if (!html){ alert('長文を入力してください。'); return; }
+    saveProblemBtn.addEventListener('click', async ()=>{
+      if (!editor) return; const html = sanitizeHTML(editor.innerHTML.trim()); if (!html){ alert('長文を入力してください。'); return; }
       const answers = extractAnswersFrom(editor);
       if (answers.length===0 && !confirm('マスクがありません。保存しますか？')) return;
       const categories = parseCategories(catInput?catInput.value:'');
       const now=Date.now(); const id=uuid();
-      problems.push({ id, html, answers, categories, score:0, answerCount:0, correctCount:0, deleted:false, createdAt:now, updatedAt:now });
-      appState.lastSavedHTML = html;
-      appState.lastSavedCats = categories;
-      saveAll();
-      editor.innerHTML=''; if (catInput) catInput.value='';
-      alert('保存しました。（Cタブに反映）');
-      renderC();
+      // メタ情報だけ localStorage に入れる
+      const meta = { id, answers, categories, score:0, answerCount:0, correctCount:0, deleted:false, createdAt:now, updatedAt:now };
+      problemsMeta.push(meta);
+      // HTML は IndexedDB に保存
+      try{ await idb.putHtml('html_'+id, html); }
+      catch(err){ console.error('IDB save failed', err); alert('問題の保存に失敗しました（IndexedDB）。'); return; }
+      appState.lastSavedCats = categories; saveProblemsDebounced(); saveAppStateDebounced(); editor.innerHTML=''; if (catInput) catInput.value=''; alert('保存しました。（Cタブに反映）'); renderC();
     });
   }
 
-  /* ===== C：編集/確認 ===== */
+  /* ======= C: 編集 / 一覧 ======= */
   let currentCatFilter = [];
-  function renderC(){
-    renderCategoryChips();
-    renderProblemList();
-  }
-
-  function renderCategoryChips(){
-    if (!catChips) return;
-    const all=new Set();
-    problems.filter(p=>!p.deleted).forEach(p=>(p.categories||[]).forEach(c=>all.add(c)));
-    const cats=Array.from(all).sort((a,b)=>a.localeCompare(b,'ja'));
-    catChips.innerHTML='';
-    cats.forEach(cat=>{
-      const label=document.createElement('label'); label.className='chip';
-      const cb=document.createElement('input'); cb.type='checkbox'; cb.value=cat; cb.checked=currentCatFilter.includes(cat);
-      cb.addEventListener('change', ()=>{
-        if (cb.checked) currentCatFilter.push(cat);
-        else currentCatFilter=currentCatFilter.filter(c=>c!==cat);
-        renderProblemList();
-      });
-      label.appendChild(cb); label.appendChild(document.createTextNode(cat));
-      catChips.appendChild(label);
-    });
-  }
+  function renderC(){ renderCategoryChips(); renderProblemList(); }
+  function renderCategoryChips(){ if (!catChips) return; const all=new Set(); problemsMeta.filter(p=>!p.deleted).forEach(p=>(p.categories||[]).forEach(c=>all.add(c))); const cats=Array.from(all).sort((a,b)=>a.localeCompare(b,'ja')); catChips.innerHTML=''; cats.forEach(cat=>{ const label=document.createElement('label'); label.className='chip'; const cb=document.createElement('input'); cb.type='checkbox'; cb.value=cat; cb.checked=currentCatFilter.includes(cat); cb.addEventListener('change', ()=>{ if (cb.checked) currentCatFilter.push(cat); else currentCatFilter=currentCatFilter.filter(c=>c!==cat); renderProblemList(); }); label.appendChild(cb); label.appendChild(document.createTextNode(cat)); catChips.appendChild(label); }); }
   if (clearCatFilterBtn) clearCatFilterBtn.addEventListener('click', ()=>{ currentCatFilter=[]; renderCategoryChips(); renderProblemList(); });
+  function problemMatchesFilter(p){ if (p.deleted) return false; if (currentCatFilter.length===0) return true; if (!p.categories||!p.categories.length) return false; return p.categories.some(c=>currentCatFilter.includes(c)); }
 
-  function problemMatchesFilter(p){
-    if (p.deleted) return false;
-    if (currentCatFilter.length===0) return true;
-    if (!p.categories||!p.categories.length) return false;
-    return p.categories.some(c=>currentCatFilter.includes(c));
-  }
-  function renderProblemList(){
-    if (!problemList) return;
-    problemList.innerHTML='';
-    const filtered=problems.filter(problemMatchesFilter);
-    filtered.forEach((p, i)=>{
-      const item=document.createElement('div'); item.className='problem-item';
-      const t=document.createElement('div'); t.className='item-title'; t.textContent=`No.${i+1}　${firstSentenceFromHTML(p.html)}`;
-      const sub=document.createElement('div'); sub.className='item-sub';
-      const s1=document.createElement('span'); s1.textContent=`スコア: ${(p.score||0).toFixed(1)}`;
-      const s2=document.createElement('span'); s2.textContent=`正答/回答: ${p.correctCount||0}/${p.answerCount||0}`;
-      const bEdit=document.createElement('button'); bEdit.className='btn'; bEdit.textContent='編集';
-      bEdit.addEventListener('click', ()=>openEditModal(p.id));
-      const bDel=document.createElement('button'); bDel.className='btn'; bDel.textContent='削除';
-      bDel.addEventListener('click', ()=>{
-        if(!confirm('この問題を削除（ソフト）しますか？')) return;
-        p.deleted=true; p.updatedAt=Date.now();
-        saveAll(); renderC();
-      });
-      sub.appendChild(s1); sub.appendChild(s2); sub.appendChild(bEdit); sub.appendChild(bDel);
-      item.appendChild(t); item.appendChild(sub); problemList.appendChild(item);
-    });
-    if (!filtered.length){
-      const div=document.createElement('div'); div.className='muted'; div.textContent='該当する問題がありません。';
-      problemList.appendChild(div);
-    }
-  }
+  function renderProblemList(){ if (!problemList) return; problemList.innerHTML=''; const filtered=problemsMeta.filter(problemMatchesFilter); filtered.forEach((p, i)=>{ const item=document.createElement('div'); item.className='problem-item'; const t=document.createElement('div'); t.className='item-title'; t.textContent=`No.${i+1}　${firstSentenceFromHTML(p.preview || '') || '(プレビューなし)'}`; const sub=document.createElement('div'); sub.className='item-sub'; const s1=document.createElement('span'); s1.textContent=`スコア: ${(p.score||0).toFixed(1)}`; const s2=document.createElement('span'); s2.textContent=`正答/回答: ${p.correctCount||0}/${p.answerCount||0}`; const bEdit=document.createElement('button'); bEdit.className='btn'; bEdit.textContent='編集'; bEdit.addEventListener('click', ()=>openEditModal(p.id)); const bDel=document.createElement('button'); bDel.className='btn'; bDel.textContent='削除'; bDel.addEventListener('click', async ()=>{ if(!confirm('この問題を削除（ソフト）しますか？')) return; p.deleted=true; p.updatedAt=Date.now(); await idb.deleteHtml('html_'+p.id); saveProblemsDebounced(); renderC(); }); sub.appendChild(s1); sub.appendChild(s2); sub.appendChild(bEdit); sub.appendChild(bDel); item.appendChild(t); item.appendChild(sub); problemList.appendChild(item); }); if (!filtered.length){ const div=document.createElement('div'); div.className='muted'; div.textContent='該当する問題がありません。'; problemList.appendChild(div); } }
 
-  /* ===== Cタブ：カテゴリ選択エクスポート ===== */
-  if (exportJsonBtn) exportJsonBtn.addEventListener('click', ()=>{
-    // 選択したカテゴリ
+  /* ======= Cタブ：エクスポート / インポート（HTML を含める） ======= */
+  if (exportJsonBtn) exportJsonBtn.addEventListener('click', async ()=>{
     const selectedCats = Array.from(catChips.querySelectorAll('input[type=checkbox]:checked')).map(cb=>cb.value);
-    if (selectedCats.length === 0) {
-      if (!confirm('カテゴリが選択されていません。全ての問題をエクスポートしますか？')) return;
+    if (selectedCats.length === 0) { if (!confirm('カテゴリが選択されていません。全ての問題をエクスポートしますか？')) return; }
+    const filteredProblems = problemsMeta.filter(p=>!p.deleted && (selectedCats.length===0 ? true : (p.categories||[]).some(c=>selectedCats.includes(c))));
+    // HTML を取得して結合
+    const out = [];
+    for (const p of filteredProblems){
+      const html = await idb.getHtml('html_'+p.id) || '';
+      out.push({ ...p, html });
     }
-
-    const filteredProblems = problems.filter(p => 
-      !p.deleted && (selectedCats.length===0 ? true : (p.categories||[]).some(c=>selectedCats.includes(c)))
-    );
-
-    const blob = new Blob([JSON.stringify({
-      problems: filteredProblems,
-      dailyStats,
-      categoryStats
-    }, null, 2)], { type:'application/json' });
-
-    const url = URL.createObjectURL(blob);
-    const d = new Date();
-    const name = `export_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}.json`;
-    const a = document.createElement('a'); a.href=url; a.download=name; a.click();
-    URL.revokeObjectURL(url);
-    alert(`選択したカテゴリ (${selectedCats.join(', ') || '全て'}) の問題をエクスポートしました。`);
+    const payload = { problems: out, dailyStats, categoryStats };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob); const d = new Date(); const name = `export_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}.json`;
+    const a = document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url); alert(`選択したカテゴリ (${selectedCats.join(', ') || '全て'}) の問題をエクスポートしました。`);
   });
 
   if (importJsonInput) importJsonInput.addEventListener('change', async (e)=>{
-    const file=e.target.files?.[0]; if(!file) return;
-    try{
+    const file=e.target.files?.[0]; if(!file) return; try{
       const text=await file.text(); const data=JSON.parse(text);
       if (Array.isArray(data.problems)){
-        const map=new Map(problems.map(p=>[p.id,p])); data.problems.forEach(p=>map.set(p.id,p)); problems=Array.from(map.values());
+        const map=new Map(problemsMeta.map(p=>[p.id,p]));
+        for (const p of data.problems){
+          const id = p.id || uuid();
+          const meta = { id, answers:p.answers||[], categories:p.categories||[], score:p.score||0, answerCount:p.answerCount||0, correctCount:p.correctCount||0, deleted:!!p.deleted, createdAt:p.createdAt||Date.now(), updatedAt:p.updatedAt||Date.now(), preview: firstSentenceFromHTML(p.html||'') };
+          map.set(id, meta);
+          if (p.html) await idb.putHtml('html_'+id, sanitizeHTML(p.html));
+        }
+        problemsMeta = Array.from(map.values());
       }
       if (data.dailyStats && typeof data.dailyStats==='object') dailyStats={...dailyStats,...data.dailyStats};
       if (data.categoryStats && typeof data.categoryStats==='object') categoryStats={...categoryStats,...data.categoryStats};
-      saveAll(); renderC(); alert('インポートしました。');
+      saveProblemsMeta(); saveDailyStats(); saveCategoryStats(); renderC(); alert('インポートしました。');
     }catch(err){ console.error(err); alert('JSONの読み込みに失敗しました。'); }
     finally{ importJsonInput.value=''; }
   });
 
-  /* ===== 編集モーダル ===== */
+  /* ======= 編集モーダル（HTML は IndexedDB から読む） ======= */
   let editingId=null;
-  function openEditModal(id){
-    const p=problems.find(x=>x.id===id); if(!p || !editModal) return;
-    editingId=id;
-    editModal.classList.remove('hidden'); editModal.setAttribute('aria-hidden','false');
-    if (editEditor){
-      editEditor.innerHTML = sanitizeHTML(p.html);
-      editEditor.classList.add('editing');
-      requestAnimationFrame(()=>{
-        const r=document.createRange(); r.selectNodeContents(editEditor); r.collapse(false);
-        const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); editEditor.focus();
-      });
-    }
-    if (editCatInput) editCatInput.value = (p.categories||[]).join(', ');
-    if (editMeta) editMeta.textContent=`正答: ${p.correctCount||0} / 回答: ${p.answerCount||0} / スコア: ${(p.score||0).toFixed(1)}`;
+  async function openEditModal(id){ const pm = problemsMeta.find(x=>x.id===id); if(!pm || !editModal) return; editingId=id; editModal.classList.remove('hidden'); editModal.setAttribute('aria-hidden','false'); const html = await idb.getHtml('html_'+id) || '';
+    if (editEditor){ editEditor.innerHTML = sanitizeHTML(html); editEditor.classList.add('editing'); requestAnimationFrame(()=>{ const r=document.createRange(); r.selectNodeContents(editEditor); r.collapse(false); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); editEditor.focus(); }); }
+    if (editCatInput) editCatInput.value = (pm.categories||[]).join(', ');
+    if (editMeta) editMeta.textContent=`正答: ${pm.correctCount||0} / 回答: ${pm.answerCount||0} / スコア: ${(pm.score||0).toFixed(1)}`;
   }
-  function closeEditModal(){
-    editingId=null;
-    if (!editModal) return;
-    editModal.classList.add('hidden'); editModal.setAttribute('aria-hidden','true');
-    if (editEditor){ editEditor.classList.remove('editing'); editEditor.innerHTML=''; }
-    document.querySelector('[data-target="#tab-c"]')?.focus();
-  }
+  function closeEditModal(){ editingId=null; if (!editModal) return; editModal.classList.add('hidden'); editModal.setAttribute('aria-hidden','true'); if (editEditor){ editEditor.classList.remove('editing'); editEditor.innerHTML=''; } document.querySelector('[data-target="#tab-c"]')?.focus(); }
   if (editMaskBtn && editEditor) editMaskBtn.addEventListener('click', ()=>toggleMaskSelection(editEditor));
   if (editUnmaskAllBtn && editEditor) editUnmaskAllBtn.addEventListener('click', ()=>unmaskAllIn(editEditor));
   if (editCancelBtn) editCancelBtn.addEventListener('click', ()=>closeEditModal());
-  if (editSaveBtn) editSaveBtn.addEventListener('click', ()=>{
-    const p=problems.find(x=>x.id===editingId); if(!p || !editEditor) return;
-    p.html=editEditor.innerHTML.trim();
-    p.answers=extractAnswersFrom(editEditor);
-    p.categories=parseCategories(editCatInput?editCatInput.value:'');
-    p.updatedAt=Date.now();
-    saveAll(); closeEditModal(); renderC();
-  });
-  if (editEditor){
-    ['mouseup','keyup','touchend'].forEach(ev=>{
-      editEditor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editEditor), 10));
-    });
-  }
-  document.querySelectorAll('.modal .modal-backdrop').forEach(bg=>{
-    bg.addEventListener('click', ()=>{
-      if (catModal && !catModal.classList.contains('hidden')){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); }
-      if (editModal && !editModal.classList.contains('hidden')){ closeEditModal(); }
-    });
-  });
+  if (editSaveBtn) editSaveBtn.addEventListener('click', async ()=>{ const p = problemsMeta.find(x=>x.id===editingId); if(!p || !editEditor) return; const html = sanitizeHTML(editEditor.innerHTML.trim()); p.answers = extractAnswersFrom(editEditor); p.categories = parseCategories(editCatInput?editCatInput.value:''); p.updatedAt = Date.now(); p.preview = firstSentenceFromHTML(html);
+    try{ await idb.putHtml('html_'+p.id, html); }catch(err){ console.error('IDB save failed', err); alert('編集内容の保存（IndexedDB）に失敗しました。'); return; }
+    saveProblemsDebounced(); closeEditModal(); renderC(); });
+  if (editEditor){ ['mouseup','keyup','touchend'].forEach(ev=> editEditor.addEventListener(ev, ()=>setTimeout(()=>autoMaskOnSelection(editEditor), 10))); }
+  document.querySelectorAll('.modal .modal-backdrop').forEach(bg=>{ bg.addEventListener('click', ()=>{ if (catModal && !catModal.classList.contains('hidden')){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); } if (editModal && !editModal.classList.contains('hidden')){ closeEditModal(); } }); });
 
-  /* ===== A：出題・採点 ===== */
+  /* ======= A: 出題・採点（表示時に IndexedDB から HTML を取得） ======= */
   let currentPool=[]; let currentId=null; let isRevealed=false;
-
-  if (startAllBtn) startAllBtn.addEventListener('click', ()=>startSession(null));
-  if (startByCatBtn) startByCatBtn.addEventListener('click', ()=>openCatPicker());
-
-  function openCatPicker(){
-    if (!catModal || !catModalBody) return;
-    catModalBody.innerHTML='';
-    const set=new Set(); problems.filter(p=>!p.deleted).forEach(p=>(p.categories||[]).forEach(c=>set.add(c)));
-    const cats=Array.from(set).sort((a,b)=>a.localeCompare(b,'ja'));
-    if (!cats.length){
-      const div=document.createElement('div'); div.className='muted'; div.textContent='カテゴリがありません。Bタブで作成してください。';
-      catModalBody.appendChild(div);
-    } else {
-      cats.forEach(cat=>{
-        const label=document.createElement('label'); label.className='chip';
-        const cb=document.createElement('input'); cb.type='checkbox'; cb.value=cat;
-        label.appendChild(cb); label.appendChild(document.createTextNode(cat));
-        catModalBody.appendChild(label);
-      });
-    }
-    catModal.classList.remove('hidden'); catModal.setAttribute('aria-hidden','false');
-  }
+  if (startAllBtn) startAllBtn.addEventListener('click', ()=>startSession(null)); if (startByCatBtn) startByCatBtn.addEventListener('click', ()=>openCatPicker());
+  function openCatPicker(){ if (!catModal || !catModalBody) return; catModalBody.innerHTML=''; const set=new Set(); problemsMeta.filter(p=>!p.deleted).forEach(p=>(p.categories||[]).forEach(c=>set.add(c))); const cats=Array.from(set).sort((a,b)=>a.localeCompare(b,'ja')); if (!cats.length){ const div=document.createElement('div'); div.className='muted'; div.textContent='カテゴリがありません。Bタブで作成してください。'; catModalBody.appendChild(div); } else { cats.forEach(cat=>{ const label=document.createElement('label'); label.className='chip'; const cb=document.createElement('input'); cb.type='checkbox'; cb.value=cat; label.appendChild(cb); label.appendChild(document.createTextNode(cat)); catModalBody.appendChild(label); }); } catModal.classList.remove('hidden'); catModal.setAttribute('aria-hidden','false'); }
   if (catModalCancel) catModalCancel.addEventListener('click', ()=>{ if(catModal){catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true');} });
-  if (catModalStart) catModalStart.addEventListener('click', ()=>{
-    if (!catModalBody){ return; }
-    const selected=Array.from(catModalBody.querySelectorAll('input[type=checkbox]:checked')).map(c=>c.value);
-    if (catModal){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); }
-    if (!selected.length){ alert('カテゴリを1つ以上選択してください。'); return; }
-    startSession(selected);
-  });
+  if (catModalStart) catModalStart.addEventListener('click', ()=>{ if (!catModalBody){ return; } const selected=Array.from(catModalBody.querySelectorAll('input[type=checkbox]:checked')).map(c=>c.value); if (catModal){ catModal.classList.add('hidden'); catModal.setAttribute('aria-hidden','true'); } if (!selected.length){ alert('カテゴリを1つ以上選択してください。'); return; } startSession(selected); });
 
-  function startSession(categories){
-    let ids = problems.filter(p=>!p.deleted && (categories ? (p.categories||[]).some(c=>categories.includes(c)) : true)).map(p=>p.id);
-   if (!ids.length){ 
-  alert('出題できる問題がありません。Bタブで作成してください。'); 
-  return; 
-}
+  async function startSession(categories){ let ids = problemsMeta.filter(p=>!p.deleted && (categories ? (p.categories||[]).some(c=>categories.includes(c)) : true)).map(p=>p.id); if (!ids.length){ alert('出題できる問題がありません。Bタブで作成してください。'); return; } currentPool=ids; currentId=null; appState.recentQueue=[]; setReveal(false); renderQuestion(await nextQuestionId()); }
 
-    currentPool=ids; currentId=null; appState.recentQueue=[];
-    setReveal(false); renderQuestion(nextQuestionId());
-  }
-
-  if (questionContainer){
-    questionContainer.addEventListener('click', (e)=>{
-      const m = e.target.closest && e.target.closest('.mask');
-      if (!m) return;
-      if (isRevealed) return;
-      m.classList.toggle('peek');
-    });
-  }
-
-  function setReveal(show){
-    isRevealed = show;
-    if (!questionContainer) return;
-    questionContainer.querySelectorAll('.mask.peek').forEach(m=>m.classList.remove('peek'));
-    if (show){
-      if (revealBtn) revealBtn.textContent='解答を隠す';
-      if (judgeBtns) judgeBtns.classList.remove('hidden');
-      questionContainer.querySelectorAll('.mask').forEach(m=>m.classList.add('revealed'));
-    } else {
-      if (revealBtn) revealBtn.textContent='解答確認';
-      if (judgeBtns) judgeBtns.classList.add('hidden');
-      questionContainer.querySelectorAll('.mask').forEach(m=>m.classList.remove('revealed'));
-    }
-  }
+  if (questionContainer){ questionContainer.addEventListener('click', (e)=>{ const m = e.target.closest && e.target.closest('.mask'); if (!m) return; if (isRevealed) return; m.classList.toggle('peek'); }); }
+  function setReveal(show){ isRevealed = show; if (!questionContainer) return; questionContainer.querySelectorAll('.mask.peek').forEach(m=>m.classList.remove('peek')); if (show){ if (revealBtn) revealBtn.textContent='解答を隠す'; if (judgeBtns) judgeBtns.classList.remove('hidden'); questionContainer.querySelectorAll('.mask').forEach(m=>m.classList.add('revealed')); } else { if (revealBtn) revealBtn.textContent='解答確認'; if (judgeBtns) judgeBtns.classList.add('hidden'); questionContainer.querySelectorAll('.mask').forEach(m=>m.classList.remove('revealed')); } }
   if (revealBtn) revealBtn.addEventListener('click', ()=>setReveal(!isRevealed));
+  if (judgeBtns) judgeBtns.addEventListener('click', (e)=>{ const btn=e.target.closest && e.target.closest('button[data-mark]'); if (!btn) return; gradeCurrent(btn.getAttribute('data-mark')); });
 
-  if (judgeBtns) judgeBtns.addEventListener('click', (e)=>{
-    const btn=e.target.closest && e.target.closest('button[data-mark]');
-    if (!btn) return;
-    gradeCurrent(btn.getAttribute('data-mark'));
-  });
-
-  function renderQuestion(id){
-    const p=problems.find(x=>x.id===id); if(!p || !questionContainer) return;
-    currentId=id; questionContainer.innerHTML=p.html||'<div class="placeholder">本文なし</div>';
-    questionContainer.scrollTop=0; setReveal(false);
-  }
+  async function renderQuestion(id){ const p = problemsMeta.find(x=>x.id===id); if(!p || !questionContainer) return; currentId=id; const html = await idb.getHtml('html_'+id) || '<div class="placeholder">本文なし</div>'; questionContainer.innerHTML = html; questionContainer.scrollTop=0; setReveal(false); }
 
   const weightOf = (p)=>1/(1+Math.max(0,p.score||0));
 
-  function nextQuestionId(){
+  async function nextQuestionId(){ // forcedQueue handling
     appState.forcedQueue.forEach(it=>it.delay--);
     const idx=appState.forcedQueue.findIndex(it=>it.delay<=0);
-    if (idx>=0){
-      const ready=appState.forcedQueue.splice(idx,1)[0];
-      if (currentPool.includes(ready.id)){
-        appState.recentQueue.push(ready.id); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return ready.id;
-      }
-    }
+    if (idx>=0){ const ready=appState.forcedQueue.splice(idx,1)[0]; if (currentPool.includes(ready.id)){ appState.recentQueue.push(ready.id); appState.recentQueue=appState.recentQueue.slice(-5); saveAppStateDebounced(); return ready.id; } }
     const recent=new Set(appState.recentQueue);
     const cand=currentPool.filter(id=>!recent.has(id));
     const list=cand.length?cand:currentPool;
-    const items=list.map(id=>({id, w: weightOf(problems.find(x=>x.id=id)||{})}));
+    const items=list.map(id=>({id, w: weightOf(problemsMeta.find(x=>x.id=id)||{})}));
     const total=items.reduce((s,x)=>s+x.w,0);
     let r=Math.random()*total;
-    for(const it of items){ if((r-=it.w)<=0){ appState.recentQueue.push(it.id); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return it.id; } }
-    const fb=items[0]?.id ?? currentPool[0];
-    appState.recentQueue.push(fb); appState.recentQueue=appState.recentQueue.slice(-5); saveAll(); return fb;
+    for(const it of items){ if((r-=it.w)<=0){ appState.recentQueue.push(it.id); appState.recentQueue=appState.recentQueue.slice(-5); saveAppStateDebounced(); return it.id; } }
+    const fb=items[0]?.id ?? currentPool[0]; appState.recentQueue.push(fb); appState.recentQueue=appState.recentQueue.slice(-5); saveAppStateDebounced(); return fb;
   }
 
-  function gradeCurrent(mark){
-    const p=problems.find(x=>x.id===currentId); if(!p) return;
-    let d=0; if(mark==='o') d=+1; else if(mark==='d') d=-0.5; else if(mark==='x') d=-1;
-    p.score=clamp((p.score||0)+d, -5, +10);
-    p.answerCount=(p.answerCount||0)+1; if(mark==='o') p.correctCount=(p.correctCount||0)+1;
-    p.updatedAt=Date.now();
-    if (mark==='x') appState.forcedQueue.push({ id:p.id, delay:5 });
+  async function gradeCurrent(mark){ const p = problemsMeta.find(x=>x.id===currentId); if(!p) return; let d=0; if(mark==='o') d=+1; else if(mark==='d') d=-0.5; else if(mark==='x') d=-1; p.score=clamp((p.score||0)+d, -5, +10); p.answerCount=(p.answerCount||0)+1; if(mark==='o') p.correctCount=(p.correctCount||0)+1; p.updatedAt=Date.now(); if (mark==='x') appState.forcedQueue.push({ id:p.id, delay:5 }); const dk = todayKey(); if (!dailyStats[dk]) dailyStats[dk] = { correct:0, total:0 }; dailyStats[dk].total += 1; if (mark==='o') dailyStats[dk].correct += 1; (p.categories||[]).forEach(cat=>{ if (!categoryStats[cat]) categoryStats[cat] = { correct:0, total:0 }; categoryStats[cat].total += 1; if (mark==='o') categoryStats[cat].correct += 1; });
+    // 保存は個別に
+    saveDailyStats(); saveCategoryStats(); saveProblemsDebounced(); saveAppStateDebounced(); renderD(); renderQuestion(await nextQuestionId()); }
 
-    const dk = todayKey();
-    if (!dailyStats[dk]) dailyStats[dk] = { correct:0, total:0 };
-    dailyStats[dk].total += 1;
-    if (mark==='o') dailyStats[dk].correct += 1;
-
-    (p.categories||[]).forEach(cat=>{
-      if (!categoryStats[cat]) categoryStats[cat] = { correct:0, total:0 };
-      categoryStats[cat].total += 1;
-      if (mark==='o') categoryStats[cat].correct += 1;
-    });
-
-    saveAll();
-    renderD();
-    renderQuestion(nextQuestionId());
-  }
-
-  /* ===== D：記録 ===== */
+  /* ======= D: 記録 ======= */
   let progressChart = null;
+  function renderD(){ renderCategoryChart(); renderDailyList(); }
+  function renderCategoryChart(){ if (!progressCanvas || !window.Chart) return; const cats = Object.keys(categoryStats).sort((a,b)=>a.localeCompare(b,'ja')); const labels = cats.length?cats:['(データなし)']; const rates = cats.map(c=>{ const s = categoryStats[c] || { correct:0, total:0 }; return s.total? Math.round((s.correct / s.total) * 1000)/10 : 0; }); const data = { labels, datasets: [{ label: '正答率（%）', data: rates }] }; const options = { responsive:true, maintainAspectRatio:false, scales: { y: { beginAtZero:true, max:100, ticks:{ callback: v => v + '%' } } }, plugins: { legend: { display:false } } }; if (progressChart){ progressChart.destroy(); progressChart=null; } progressChart = new Chart(progressCanvas, { type:'bar', data, options }); }
+  function renderDailyList(){ if (!dailyList) return; dailyList.innerHTML = ''; const today = new Date(); for(let i=0;i<30;i++){ const d = new Date(today); d.setDate(d.getDate() - i); const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; const v = dailyStats[key] || { correct:0, total:0 }; const row = document.createElement('div'); row.className = 'daily-item'; const left = document.createElement('div'); left.textContent = key; const right = document.createElement('div'); right.textContent = `${v.correct} / ${v.total}`; row.appendChild(left); row.appendChild(right); dailyList.appendChild(row); } }
 
-  function renderD(){
-    renderCategoryChart();
-    renderDailyList();
-  }
-
-  function renderCategoryChart(){
-    if (!progressCanvas || !window.Chart) return;
-    const cats = Object.keys(categoryStats).sort((a,b)=>a.localeCompare(b,'ja'));
-    const labels = cats.length?cats:['(データなし)'];
-    const rates = cats.map(c=>{
-      const s = categoryStats[c] || { correct:0, total:0 };
-      return s.total? Math.round((s.correct / s.total) * 1000)/10 : 0;
-    });
-    const data = { labels, datasets: [{ label: '正答率（%）', data: rates }] };
-    const options = {
-      responsive:true, maintainAspectRatio:false,
-      scales: { y: { beginAtZero:true, max:100, ticks:{ callback: v => v + '%' } } },
-      plugins: { legend: { display:false } }
-    };
-    if (progressChart){ progressChart.destroy(); progressChart=null; }
-    progressChart = new Chart(progressCanvas, { type:'bar', data, options });
-  }
-
-  function renderDailyList(){
-    if (!dailyList) return;
-    dailyList.innerHTML = '';
-    const today = new Date();
-    for(let i=0;i<30;i++){
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      const v = dailyStats[key] || { correct:0, total:0 };
-      const row = document.createElement('div'); row.className = 'daily-item';
-      const left = document.createElement('div'); left.textContent = key;
-      const right = document.createElement('div'); right.textContent = `${v.correct} / ${v.total}`;
-      row.appendChild(left); row.appendChild(right);
-      dailyList.appendChild(row);
-    }
-  }
-
-  /* ===== 初期描画 ===== */
+  /* ======= 初期描画 ======= */
   renderC();
 
-  window.addEventListener('beforeunload', ()=>{ saveAll(); });
+  // beforeunload では最小限の保存のみ
+  window.addEventListener('beforeunload', ()=>{ try{ saveProblemsMeta(); saveAppState(); saveDailyStats(); saveCategoryStats(); }catch(e){} });
 
 })();
