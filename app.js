@@ -64,7 +64,22 @@ function compactMaskHTML(html) {
 
   return container.innerHTML.trim();
 }
+/* ===== 赤文字（span-red）を自動でマスクに変換 ===== */
+function convertRedSpanToMask(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html;
 
+  // 赤文字（span-red）をすべて mask に変換
+  container.querySelectorAll('.span-red').forEach(red => {
+    const mask = document.createElement('span');
+    mask.className = 'mask';
+    mask.textContent = red.textContent;
+
+    red.replaceWith(mask);
+  });
+
+  return container.innerHTML;
+}
   const loadJSON = (k, fb) => {
     try {
       const v = localStorage.getItem(k);
@@ -456,6 +471,7 @@ function compactMaskHTML(html) {
         return;
       }
       html = sanitizeHTML(html);
+      html = convertRedSpanToMask(html); // ★追加：赤文字→マスク
       html = compactMaskHTML(html); // ★追加
 
       const answers = extractAnswersFrom(editor);
