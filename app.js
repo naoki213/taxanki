@@ -1090,12 +1090,19 @@ if (editUnmaskModeBtn) {
   }
 
   if (editEditor) {
-    ['mouseup', 'keyup', 'touchend'].forEach((ev) => {
-      editEditor.addEventListener(ev, () =>
-        setTimeout(() => autoMaskOnSelection(editEditor), 10)
-      );
-    });
-  }
+  editEditor.addEventListener('mouseup', () => {
+    setTimeout(() => {
+      if (editUnmaskMode) {
+        // ★解除モード
+        unmaskInSelection(editEditor);
+      } else {
+        // ★通常モード（マスク作成）
+        autoMaskOnSelection(editEditor);
+      }
+    }, 10);
+  });
+}
+
 
   document.querySelectorAll('.modal .modal-backdrop').forEach((bg) => {
     bg.addEventListener('click', () => {
