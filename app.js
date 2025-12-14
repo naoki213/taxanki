@@ -405,15 +405,23 @@ function convertRedSpanToMask(html) {
 
   /* ===== B：マスク問題 ===== */
   if (editor) {
-    editor.addEventListener('paste', () =>
-      setTimeout(() => {
-        appState.lastPastedHTML = editor.innerHTML;
-        if (catInput && catInput.value && catInput.value.trim()) {
-          appState.lastPastedCats = catInput.value.trim();
-        }
-        saveAppState();
-      }, 0)
-    );
+    editor.addEventListener('paste', () => {
+  setTimeout(() => {
+    let html = editor.innerHTML;
+
+    // ★ 自動マスク発動ポイント
+    html = convertRedSpanToMask(html);
+
+    editor.innerHTML = html;
+
+    appState.lastPastedHTML = html;
+    if (catInput && catInput.value.trim()) {
+      appState.lastPastedCats = catInput.value.trim();
+    }
+    saveAppState();
+  }, 0);
+});
+
 
     if (maskBtn) {
       maskBtn.addEventListener('click', () => toggleMaskSelection(editor));
