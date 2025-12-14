@@ -19,6 +19,52 @@
   };
 
   /* ===== 便利関数 ===== */
+  /* ===== マスクHTML簡略化（改行は残す） ===== */
+function compactMaskHTML(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html;
+
+  // ① script 等は念のため削除
+  container.querySelectorAll('script,style,iframe,object,embed').forEach(n => n.remove());
+
+  // ② 不要な属性を削除（class は mask のみ残す）
+  container.querySelectorAll('*').forEach(el => {
+    [...el.attributes].forEach(attr => {
+      if (attr.name === 'class') {
+        if (!el.classList.contains('mask')) {
+          el.removeAttribute('class');
+        } else {
+          el.className = 'mask'; // mask のみに正規化
+        }
+      } else {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+
+  // ③ テキストノード整理（改行は残す）
+  const walker = document.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT,
+    null
+  );
+
+  const texts = [];
+  while (walker.nextNode()) {
+    texts.push(walker.currentNode);
+  }
+
+  texts.forEach(node => {
+    // 改行を含む空白は保持、それ以外の連続空白だけ圧縮
+    node.textContent = node.textContent
+      .replace(/[ \t]+/g, ' ')   // 半角空白・タブだけ圧縮
+      .replace(/ \n/g, '\n')
+      .replace(/\n /g, '\n');
+  });
+
+  return container.innerHTML.trim();
+}
+
   const loadJSON = (k, fb) => {
     try {
       const v = localStorage.getItem(k);
@@ -409,6 +455,8 @@
         return;
       }
       html = sanitizeHTML(html);
+      html = compactMaskHTML(html); // ★追加
+
       const answers = extractAnswersFrom(editor);
       if (answers.length === 0 && !confirm('マスクがありません。保存しますか？'))
         return;
@@ -915,7 +963,9 @@
       } else {
         // マスク
         if (!editEditor) return;
-        const html = sanitizeHTML(editEditor.innerHTML.trim());
+        let html = sanitizeHTML(editEditor.innerHTML.trim());
+        html = compactMaskHTML(html); // ★追加
+
         p.html = html;
         p.answers = extractAnswersFrom(editEditor);
         p.summary = summaryFromHTML(html);
