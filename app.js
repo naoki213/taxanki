@@ -1026,6 +1026,20 @@ function purgeDeletedProblems() {
   if (editUnmaskAllBtn && editEditor) {
     editUnmaskAllBtn.addEventListener('click', () => unmaskAllIn(editEditor));
   }
+  const editUnmaskModeBtn = $('#editUnmaskModeBtn');
+
+if (editUnmaskModeBtn) {
+  editUnmaskModeBtn.addEventListener('click', () => {
+    editUnmaskMode = !editUnmaskMode;
+
+    // 見た目でON/OFFを分かりやすく
+    editUnmaskModeBtn.classList.toggle('primary', editUnmaskMode);
+    editUnmaskModeBtn.textContent = editUnmaskMode
+      ? '解除モード中'
+      : '解除モード';
+  });
+}
+
   if (editCancelBtn) {
     editCancelBtn.addEventListener('click', () => closeEditModal());
   }
