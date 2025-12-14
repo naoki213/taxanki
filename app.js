@@ -1009,16 +1009,18 @@ function purgeDeletedProblems() {
   }
 
   function closeEditModal() {
-    editingId = null;
-    if (!editModal) return;
-    editModal.classList.add('hidden');
-    editModal.setAttribute('aria-hidden', 'true');
-    if (editEditor) {
-      editEditor.classList.remove('editing');
-      editEditor.innerHTML = '';
-    }
-    document.querySelector('[data-target="#tab-c"]')?.focus();
+  editingId = null;
+  editUnmaskMode = false; // ★ 必須：解除モード解除
+  if (!editModal) return;
+  editModal.classList.add('hidden');
+  editModal.setAttribute('aria-hidden', 'true');
+  if (editEditor) {
+    editEditor.classList.remove('editing');
+    editEditor.innerHTML = '';
   }
+  document.querySelector('[data-target="#tab-c"]')?.focus();
+}
+
 
   if (editMaskBtn && editEditor) {
     editMaskBtn.addEventListener('click', () => toggleMaskSelection(editEditor));
@@ -1089,19 +1091,22 @@ if (editUnmaskModeBtn) {
     });
   }
 
-  if (editEditor) {
-  editEditor.addEventListener('mouseup', () => {
-    setTimeout(() => {
-      if (editUnmaskMode) {
-        // ★解除モード
-        unmaskInSelection(editEditor);
-      } else {
-        // ★通常モード（マスク作成）
-        autoMaskOnSelection(editEditor);
-      }
-    }, 10);
+ if (editEditor) {
+  ['mouseup', 'keyup', 'touchend'].forEach(ev => {
+    editEditor.addEventListener(ev, () => {
+      setTimeout(() => {
+        if (editUnmaskMode) {
+          // ★ 複数マスク一括解除
+          unmaskInSelection(editEditor);
+        } else {
+          // ★ 通常のマスク作成
+          autoMaskOnSelection(editEditor);
+        }
+      }, 10);
+    });
   });
 }
+
 
 
   document.querySelectorAll('.modal .modal-backdrop').forEach((bg) => {
