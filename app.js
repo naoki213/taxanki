@@ -1,9 +1,13 @@
 /* ======================================================
- * 消費税法 暗記アプリ（パフォーマンス改善版：Level 2）
- * - Chart.js を用いてカテゴリごとの正答率を表示
- * - 日別の正答/回答を localStorage にて保存（直近30日表示）
- * - Cタブのカテゴリ選択に応じた部分エクスポート対応
- * - saveAll() 廃止 & 一覧表示を 200件までに制限
+ * 消費税法 暗記アプリ（拡張版）
+ * - 3種類の問題形式
+ *   ① マスク問題（従来）
+ *   ② 文章問題（Q&A）
+ *   ③ ○×問題
+ * - 出題条件：カテゴリ／問題形式／スコア条件（+3,+5,+7以下）
+ * - Aタブ「すべてから出題」は完全無条件（全問題＋重み＋forcedQueue）
+ * - Dタブグラフ：カテゴリごとの「スコアが閾値以上の問題数」
+ * - サマリー：先頭20文字（○×問題は「（○×）」付き）
  * ====================================================== */
 (() => {
   /* ===== LocalStorage Keys ===== */
@@ -24,16 +28,6 @@
     }
   };
   const saveJSON = (k, v) => localStorage.setItem(k, JSON.stringify(v));
-
-  // それぞれを個別保存（巨大な problems 全体を毎回書き込まない）
-  const saveProblems     = () => saveJSON(LS_KEYS.PROBLEMS, problems);
-  const saveAppState     = () => saveJSON(LS_KEYS.APPSTATE, appState);
-  const saveDailyStats   = () => saveJSON(LS_KEYS.DAILYSTATS, dailyStats);
-  const saveCategoryStats= () => saveJSON(LS_KEYS.CATEGORY_STATS, categoryStats);
-  const saveStats = () => {
-    saveDailyStats();
-    saveCategoryStats();
-  };
 
   const uuid = () =>
     'p-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -67,15 +61,27 @@
       p.removeChild(m);
     });
 
-  const firstSentenceFromHTML = (html) => {
+  const summaryFromHTML = (html) => {
     const d = document.createElement('div');
     d.innerHTML = html;
-    const t = (d.textContent || '').replace(/\s+/g, ' ').trim();
+    const t = (d.textContent || '').replace(/\s+/g, '');
     if (!t) return '(空)';
-    const i = t.indexOf('。');
-    if (i >= 0) return t.slice(0, Math.min(i + 1, 120));
-    return t.slice(0, 100) + (t.length > 100 ? '…' : '');
+    return t.slice(0, 20);
   };
+
+  const summaryFromText = (text, suffix = '') => {
+    const t = String(text || '').replace(/\s+/g, '');
+    if (!t) return '(空)';
+    return t.slice(0, 20) + suffix;
+  };
+
+  const escapeHTML = (str) =>
+    String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
   const sanitizeHTML = (html) => {
     const d = document.createElement('div');
@@ -91,15 +97,30 @@
     return d.innerHTML;
   };
 
-  // summary がない問題に対して、先頭文サマリを付与
   const ensureProblemSummary = (p) => {
-    if (!p.summary) {
-      p.summary = firstSentenceFromHTML(p.html || '');
+    if (p.type === 'qa') {
+      if (!p.summary) p.summary = summaryFromText(p.question || '');
+    } else if (p.type === 'ox') {
+      if (!p.summary) p.summary = summaryFromText(p.question || '', '（○×）');
+    } else {
+      if (!p.summary) p.summary = summaryFromHTML(p.html || '');
     }
   };
 
+  const normalizeProblem = (p) => {
+    if (!p.type) p.type = 'mask';
+    if (typeof p.score !== 'number') p.score = 0;
+    if (typeof p.answerCount !== 'number') p.answerCount = 0;
+    if (typeof p.correctCount !== 'number') p.correctCount = 0;
+    if (!Array.isArray(p.categories)) {
+      p.categories = p.categories ? [].concat(p.categories) : [];
+    }
+    ensureProblemSummary(p);
+    return p;
+  };
+
   /* ===== 状態 ===== */
-  let problems = loadJSON(LS_KEYS.PROBLEMS, []);
+  let problems = loadJSON(LS_KEYS.PROBLEMS, []).map(normalizeProblem);
   let appState = loadJSON(LS_KEYS.APPSTATE, {
     recentQueue: [],
     forcedQueue: [],
@@ -111,13 +132,6 @@
   let dailyStats = loadJSON(LS_KEYS.DAILYSTATS, {});
   let categoryStats = loadJSON(LS_KEYS.CATEGORY_STATS, {});
 
-  // 既存データには summary が無いことがあるので、起動時に最低限メモリ上だけ埋める
-  problems.forEach((p) => {
-    if (!p.summary && p.html) {
-      p.summary = firstSentenceFromHTML(p.html);
-    }
-  });
-
   /* ===== DOM 取得 ===== */
   const $  = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
@@ -127,20 +141,39 @@
   const pages      = $$('.page');
 
   // A
-  const startAllBtn      = $('#startAllBtn');
-  const startByCatBtn    = $('#startByCatBtn');
-  const questionContainer= $('#questionContainer');
-  const revealBtn        = $('#revealBtn');
-  const judgeBtns        = $('#judgeBtns');
+  const startAllBtn       = $('#startAllBtn');
+  const startByCatBtn     = $('#startByCatBtn');
+  const questionContainer = $('#questionContainer');
+  const revealBtn         = $('#revealBtn');
+  const judgeBtns         = $('#judgeBtns');
 
-  // B
+  // B 共通
+  const bTypeButtons = $$('.btype-btn');
+  const bPaneMask    = $('#bPaneMask');
+  const bPaneQa      = $('#bPaneQa');
+  const bPaneOx      = $('#bPaneOx');
+
+  // B: マスク
   const editor        = $('#editor');
   const maskBtn       = $('#maskBtn');
   const unmaskAllBtn  = $('#unmaskAllBtn');
   const repeatBtn     = $('#repeatBtn');
   const clearDraftBtn = $('#clearDraftBtn');
   const catInput      = $('#catInput');
-  const saveProblemBtn= $('#saveProblemBtn');
+  const saveMaskProblemBtn = $('#saveMaskProblemBtn');
+
+  // B: QA
+  const qaQuestionInput   = $('#qaQuestionInput');
+  const qaAnswerInput     = $('#qaAnswerInput');
+  const qaCatInput        = $('#qaCatInput');
+  const saveQaProblemBtn  = $('#saveQaProblemBtn');
+
+  // B: OX
+  const oxQuestionInput     = $('#oxQuestionInput');
+  const oxCorrectInput      = $('#oxCorrectInput');
+  const oxExplanationInput  = $('#oxExplanationInput');
+  const oxCatInput          = $('#oxCatInput');
+  const saveOxProblemBtn    = $('#saveOxProblemBtn');
 
   // C
   const problemList        = $('#problemList');
@@ -148,25 +181,50 @@
   const clearCatFilterBtn  = $('#clearCatFilterBtn');
   const exportJsonBtn      = $('#exportJsonBtn');
   const importJsonInput    = $('#importJsonInput');
+  const storageInfoEl      = $('#storageInfo');
+  const cTypeButtons       = $$('.ctype-btn');
 
   // D
-  const progressCanvas = $('#progressChart');
-  const dailyList      = $('#dailyList');
+  const progressCanvas      = $('#progressChart');
+  const dailyList           = $('#dailyList');
+  const scoreFilterButtons  = $$('.score-filter-btn');
 
-  // モーダル
-  const catModal      = $('#catModal');
-  const catModalBody  = $('#catModalBody');
-  const catModalCancel= $('#catModalCancel');
-  const catModalStart = $('#catModalStart');
+  // 出題条件モーダル
+  const catModal        = $('#catModal');
+  const catModalBody    = $('#catModalBody');
+  const catModalCancel  = $('#catModalCancel');
+  const catModalStart   = $('#catModalStart');
+  const modalTypeChips  = $('#modalTypeChips');
+  const modalScoreChips = $('#modalScoreChips');
 
-  const editModal      = $('#editModal');
-  const editEditor     = $('#editEditor');
-  const editCatInput   = $('#editCatInput');
-  const editMaskBtn    = $('#editMaskBtn');
+  // 編集モーダル
+  const editModal        = $('#editModal');
+  const editTypeLabel    = $('#editTypeLabel');
+  const editEditor       = $('#editEditor');
+  const editMaskArea     = $('#editMaskArea');
+  const editQaArea       = $('#editQaArea');
+  const editOxArea       = $('#editOxArea');
+  const editQaQuestion   = $('#editQaQuestion');
+  const editQaAnswer     = $('#editQaAnswer');
+  const editOxQuestion   = $('#editOxQuestion');
+  const editOxCorrect    = $('#editOxCorrect');
+  const editOxExplanation= $('#editOxExplanation');
+  const editCatInput     = $('#editCatInput');
+  const editMaskBtn      = $('#editMaskBtn');
   const editUnmaskAllBtn = $('#editUnmaskAllBtn');
-  const editCancelBtn  = $('#editCancelBtn');
-  const editSaveBtn    = $('#editSaveBtn');
-  const editMeta       = $('#editMeta');
+  const editCancelBtn    = $('#editCancelBtn');
+  const editSaveBtn      = $('#editSaveBtn');
+  const editMeta         = $('#editMeta');
+
+  /* ===== LocalStorage 保存関数 ===== */
+  const saveProblems      = () => saveJSON(LS_KEYS.PROBLEMS, problems);
+  const saveAppState      = () => saveJSON(LS_KEYS.APPSTATE, appState);
+  const saveDailyStats    = () => saveJSON(LS_KEYS.DAILYSTATS, dailyStats);
+  const saveCategoryStats = () => saveJSON(LS_KEYS.CATEGORY_STATS, categoryStats);
+  const saveStats = () => {
+    saveDailyStats();
+    saveCategoryStats();
+  };
 
   /* ===== 自動マスク付与（選択しただけで） ===== */
   function autoMaskOnSelection(rootEditable) {
@@ -264,7 +322,26 @@
     }
   };
 
-  /* ===== B：問題作成 ===== */
+  /* ===== B：問題形式切り替え ===== */
+  let currentBType = 'mask';
+  function setBType(type) {
+    currentBType = type;
+    bTypeButtons.forEach((btn) => {
+      const t = btn.getAttribute('data-btype');
+      btn.classList.toggle('primary', t === type);
+    });
+    if (bPaneMask) bPaneMask.classList.toggle('hidden', type !== 'mask');
+    if (bPaneQa)   bPaneQa.classList.toggle('hidden', type !== 'qa');
+    if (bPaneOx)   bPaneOx.classList.toggle('hidden', type !== 'ox');
+  }
+  bTypeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const t = btn.getAttribute('data-btype');
+      if (t) setBType(t);
+    });
+  });
+
+  /* ===== B：マスク問題 ===== */
   if (editor) {
     editor.addEventListener('paste', () =>
       setTimeout(() => {
@@ -321,14 +398,17 @@
     });
   }
 
-  if (saveProblemBtn) {
-    saveProblemBtn.addEventListener('click', () => {
+  // マスク問題保存
+  const saveMaskProblemBtnEl = saveMaskProblemBtn;
+  if (saveMaskProblemBtnEl) {
+    saveMaskProblemBtnEl.addEventListener('click', () => {
       if (!editor) return;
-      const html = editor.innerHTML.trim();
+      let html = editor.innerHTML.trim();
       if (!html) {
         alert('長文を入力してください。');
         return;
       }
+      html = sanitizeHTML(html);
       const answers = extractAnswersFrom(editor);
       if (answers.length === 0 && !confirm('マスクがありません。保存しますか？'))
         return;
@@ -336,14 +416,14 @@
       const categories = parseCategories(catInput ? catInput.value : '');
       const now = Date.now();
       const id = uuid();
-      const summary = firstSentenceFromHTML(html);
 
-      problems.push({
+      const p = normalizeProblem({
         id,
+        type: 'mask',
         html,
         answers,
         categories,
-        summary,
+        summary: summaryFromHTML(html),
         score: 0,
         answerCount: 0,
         correctCount: 0,
@@ -351,6 +431,8 @@
         createdAt: now,
         updatedAt: now,
       });
+
+      problems.push(p);
 
       appState.lastSavedHTML = html;
       appState.lastSavedCats = categories;
@@ -365,13 +447,105 @@
     });
   }
 
+  /* ===== B：文章問題保存 ===== */
+  if (saveQaProblemBtn) {
+    saveQaProblemBtn.addEventListener('click', () => {
+      const q = (qaQuestionInput?.value || '').trim();
+      const a = (qaAnswerInput?.value || '').trim();
+      if (!q || !a) {
+        alert('問題と解答を入力してください。');
+        return;
+      }
+      const categories = parseCategories(qaCatInput ? qaCatInput.value : '');
+      const now = Date.now();
+      const id = uuid();
+
+      const p = normalizeProblem({
+        id,
+        type: 'qa',
+        question: q,
+        answer: a,
+        categories,
+        summary: summaryFromText(q),
+        score: 0,
+        answerCount: 0,
+        correctCount: 0,
+        deleted: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      problems.push(p);
+      saveProblems();
+
+      if (qaQuestionInput) qaQuestionInput.value = '';
+      if (qaAnswerInput) qaAnswerInput.value = '';
+      if (qaCatInput) qaCatInput.value = '';
+      alert('文章問題を保存しました。（Cタブに反映）');
+
+      rerenderCIfVisible();
+    });
+  }
+
+  /* ===== B：○×問題保存 ===== */
+  if (saveOxProblemBtn) {
+    saveOxProblemBtn.addEventListener('click', () => {
+      const q = (oxQuestionInput?.value || '').trim();
+      const correct = oxCorrectInput?.value === 'x' ? 'x' : 'o';
+      const explanation = (oxExplanationInput?.value || '').trim();
+      if (!q) {
+        alert('問題を入力してください。');
+        return;
+      }
+      const categories = parseCategories(oxCatInput ? oxCatInput.value : '');
+      const now = Date.now();
+      const id = uuid();
+
+      const p = normalizeProblem({
+        id,
+        type: 'ox',
+        question: q,
+        correct,
+        explanation,
+        categories,
+        summary: summaryFromText(q, '（○×）'),
+        score: 0,
+        answerCount: 0,
+        correctCount: 0,
+        deleted: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      problems.push(p);
+      saveProblems();
+
+      if (oxQuestionInput) oxQuestionInput.value = '';
+      if (oxExplanationInput) oxExplanationInput.value = '';
+      if (oxCatInput) oxCatInput.value = '';
+      alert('○×問題を保存しました。（Cタブに反映）');
+
+      rerenderCIfVisible();
+    });
+  }
+
   /* ===== C：編集/確認 ===== */
   let currentCatFilter = [];
+  let currentTypeFilter = 'all';
   const MAX_LIST_ITEMS = 200; // 一覧に表示する最大件数（負荷軽減）
+
+  function updateStorageInfo() {
+    if (!storageInfoEl) return;
+    const bytes = getLocalStorageUsage();
+    const percent = (bytes / LOCALSTORAGE_LIMIT) * 100;
+    storageInfoEl.textContent =
+      `localStorage使用容量：${formatBytes(bytes)}（約 ${percent.toFixed(1)}% ）`;
+  }
 
   function renderC() {
     renderCategoryChips();
     renderProblemList();
+    updateStorageInfo();
   }
 
   function renderCategoryChips() {
@@ -409,8 +583,24 @@
     });
   }
 
+  // 形式フィルタボタン
+  cTypeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const t = btn.getAttribute('data-ctype') || 'all';
+      currentTypeFilter = t;
+      cTypeButtons.forEach((b) => b.classList.toggle('primary', b === btn));
+      renderProblemList();
+    });
+  });
+
   function problemMatchesFilter(p) {
     if (p.deleted) return false;
+
+    // 形式フィルタ
+    const t = p.type || 'mask';
+    if (currentTypeFilter !== 'all' && t !== currentTypeFilter) return false;
+
+    // カテゴリフィルタ
     if (currentCatFilter.length === 0) return true;
     if (!p.categories || !p.categories.length) return false;
     return p.categories.some((c) => currentCatFilter.includes(c));
@@ -423,6 +613,8 @@
     const filtered = problems.filter(problemMatchesFilter);
     const display  = filtered.slice(0, MAX_LIST_ITEMS);
 
+    const frag = document.createDocumentFragment();
+
     display.forEach((p, i) => {
       const item = document.createElement('div');
       item.className = 'problem-item';
@@ -431,7 +623,13 @@
       t.className = 'item-title';
 
       ensureProblemSummary(p);
-      t.textContent = `No.${i + 1}　${p.summary}`;
+
+      let typeLabel = '';
+      if (p.type === 'qa') typeLabel = '【文章】';
+      else if (p.type === 'ox') typeLabel = '【○×】';
+      else typeLabel = '【マスク】';
+
+      t.textContent = `No.${i + 1} ${typeLabel} ${p.summary}`;
 
       const sub = document.createElement('div');
       sub.className = 'item-sub';
@@ -443,12 +641,12 @@
       s2.textContent = `正答/回答: ${p.correctCount || 0}/${p.answerCount || 0}`;
 
       const bEdit = document.createElement('button');
-      bEdit.className = 'btn';
+      bEdit.className = 'btn small';
       bEdit.textContent = '編集';
       bEdit.addEventListener('click', () => openEditModal(p.id));
 
       const bDel = document.createElement('button');
-      bDel.className = 'btn';
+      bDel.className = 'btn small';
       bDel.textContent = '削除';
       bDel.addEventListener('click', () => {
         if (!confirm('この問題を削除（ソフト）しますか？')) return;
@@ -465,8 +663,10 @@
 
       item.appendChild(t);
       item.appendChild(sub);
-      problemList.appendChild(item);
+      frag.appendChild(item);
     });
+
+    problemList.appendChild(frag);
 
     if (!filtered.length) {
       const div = document.createElement('div');
@@ -544,13 +744,27 @@
 
         if (Array.isArray(data.problems)) {
           const map = new Map(problems.map((p) => [p.id, p]));
-          data.problems.forEach((p) => {
-            if (!p.summary && p.html) {
-              p.summary = firstSentenceFromHTML(p.html);
+          data.problems.forEach((np) => {
+            normalizeProblem(np);
+            const old = map.get(np.id);
+
+            if (old) {
+              // スコア関連は既存を優先
+              np.score = old.score;
+              np.answerCount = old.answerCount;
+              np.correctCount = old.correctCount;
+              np.updatedAt = Date.now(); // 更新日時だけ新しく
+
+              // カテゴリは統合して重複除去
+              np.categories = Array.from(
+                new Set([...(old.categories || []), ...(np.categories || [])])
+              );
             }
-            map.set(p.id, p);
+
+            map.set(np.id, np);
           });
-          problems = Array.from(map.values());
+
+          problems = Array.from(map.values()).map(normalizeProblem);
         }
         if (data.dailyStats && typeof data.dailyStats === 'object') {
           dailyStats = { ...dailyStats, ...data.dailyStats };
@@ -576,17 +790,40 @@
   /* ===== 編集モーダル ===== */
   let editingId = null;
 
+  function getProblemById(id) {
+    return problems.find((x) => x.id === id) || null;
+  }
+
   function openEditModal(id) {
-    const p = problems.find((x) => x.id === id);
+    const p = getProblemById(id);
     if (!p || !editModal) return;
 
     editingId = id;
     editModal.classList.remove('hidden');
     editModal.setAttribute('aria-hidden', 'false');
 
-    if (editEditor) {
-      // 編集時のみサニタイズ（頻度が低いため許容）
-      editEditor.innerHTML = sanitizeHTML(p.html);
+    // 形式ラベル
+    if (editTypeLabel) {
+      if (p.type === 'qa') editTypeLabel.textContent = '文章問題';
+      else if (p.type === 'ox') editTypeLabel.textContent = '○×問題';
+      else editTypeLabel.textContent = 'マスク問題';
+    }
+
+    if (editCatInput) {
+      editCatInput.value = (p.categories || []).join(', ');
+    }
+
+    // 各エリアの表示切替
+    const isMask = p.type === 'mask';
+    const isQa   = p.type === 'qa';
+    const isOx   = p.type === 'ox';
+
+    if (editMaskArea) editMaskArea.style.display = isMask ? '' : 'none';
+    if (editQaArea)   editQaArea.style.display   = isQa   ? '' : 'none';
+    if (editOxArea)   editOxArea.style.display   = isOx   ? '' : 'none';
+
+    if (isMask && editEditor) {
+      editEditor.innerHTML = sanitizeHTML(p.html || '');
       editEditor.classList.add('editing');
       requestAnimationFrame(() => {
         const r = document.createRange();
@@ -597,10 +834,28 @@
         s.addRange(r);
         editEditor.focus();
       });
+    } else if (editEditor) {
+      editEditor.classList.remove('editing');
+      editEditor.innerHTML = '';
     }
-    if (editCatInput) {
-      editCatInput.value = (p.categories || []).join(', ');
+
+    if (isQa) {
+      if (editQaQuestion) editQaQuestion.value = p.question || '';
+      if (editQaAnswer) editQaAnswer.value = p.answer || '';
+    } else {
+      if (editQaQuestion) editQaQuestion.value = '';
+      if (editQaAnswer) editQaAnswer.value = '';
     }
+
+    if (isOx) {
+      if (editOxQuestion) editOxQuestion.value = p.question || '';
+      if (editOxCorrect) editOxCorrect.value = p.correct === 'x' ? 'x' : 'o';
+      if (editOxExplanation) editOxExplanation.value = p.explanation || '';
+    } else {
+      if (editOxQuestion) editOxQuestion.value = '';
+      if (editOxExplanation) editOxExplanation.value = '';
+    }
+
     if (editMeta) {
       editMeta.textContent = `正答: ${p.correctCount || 0} / 回答: ${
         p.answerCount || 0
@@ -631,15 +886,42 @@
   }
   if (editSaveBtn) {
     editSaveBtn.addEventListener('click', () => {
-      const p = problems.find((x) => x.id === editingId);
-      if (!p || !editEditor) return;
+      const p = getProblemById(editingId);
+      if (!p) return;
 
-      p.html = editEditor.innerHTML.trim();
-      p.answers = extractAnswersFrom(editEditor);
       p.categories = parseCategories(editCatInput ? editCatInput.value : '');
-      p.updatedAt = Date.now();
-      p.summary = firstSentenceFromHTML(p.html);
+      const now = Date.now();
 
+      if (p.type === 'qa') {
+        const q = (editQaQuestion?.value || '').trim();
+        const a = (editQaAnswer?.value || '').trim();
+        if (!q || !a) {
+          alert('問題と解答を入力してください。');
+          return;
+        }
+        p.question = q;
+        p.answer = a;
+        p.summary = summaryFromText(q);
+      } else if (p.type === 'ox') {
+        const q = (editOxQuestion?.value || '').trim();
+        if (!q) {
+          alert('問題を入力してください。');
+          return;
+        }
+        p.question = q;
+        p.correct = editOxCorrect?.value === 'x' ? 'x' : 'o';
+        p.explanation = (editOxExplanation?.value || '').trim();
+        p.summary = summaryFromText(q, '（○×）');
+      } else {
+        // マスク
+        if (!editEditor) return;
+        const html = sanitizeHTML(editEditor.innerHTML.trim());
+        p.html = html;
+        p.answers = extractAnswersFrom(editEditor);
+        p.summary = summaryFromHTML(html);
+      }
+
+      p.updatedAt = now;
       saveProblems();
       closeEditModal();
       renderC();
@@ -667,18 +949,29 @@
   });
 
   /* ===== A：出題・採点 ===== */
+  let revealedMaskStack = [];
   let currentPool = [];
   let currentId   = null;
   let isRevealed  = false;
+  let oxAnswered  = false; // ○×問題用
 
+  function getCurrentProblem() {
+    return getProblemById(currentId);
+  }
+
+  // すべてから出題：完全無条件（全問題＋重み付け＋forcedQueue）
   if (startAllBtn) {
-    startAllBtn.addEventListener('click', () => startSession(null));
-  }
-  if (startByCatBtn) {
-    startByCatBtn.addEventListener('click', () => openCatPicker());
+    startAllBtn.addEventListener('click', () => {
+      startSession({});
+    });
   }
 
-  function openCatPicker() {
+  // 条件付き出題
+  if (startByCatBtn) {
+    startByCatBtn.addEventListener('click', () => openConditionModal());
+  }
+
+  function openConditionModal() {
     if (!catModal || !catModalBody) return;
     catModalBody.innerHTML = '';
 
@@ -722,36 +1015,66 @@
   if (catModalStart) {
     catModalStart.addEventListener('click', () => {
       if (!catModalBody) return;
-      const selected = Array.from(
+
+      // カテゴリ
+      const categories = Array.from(
         catModalBody.querySelectorAll('input[type=checkbox]:checked')
       ).map((c) => c.value);
+
+      // 問題形式（チェックなしなら全形式）
+      let types = Array.from(
+        modalTypeChips?.querySelectorAll('input[type=checkbox]:checked') || []
+      ).map((cb) => cb.value);
+      if (!types.length) {
+        types = ['mask', 'qa', 'ox'];
+      }
+
+      // スコア条件
+      let maxScore = null;
+      const checkedScore = modalScoreChips?.querySelector(
+        'input[name="scoreFilter"]:checked'
+      );
+      if (checkedScore && checkedScore.value) {
+        maxScore = Number(checkedScore.value);
+        if (Number.isNaN(maxScore)) maxScore = null;
+      }
 
       if (catModal) {
         catModal.classList.add('hidden');
         catModal.setAttribute('aria-hidden', 'true');
       }
 
-      if (!selected.length) {
-        alert('カテゴリを1つ以上選択してください。');
-        return;
-      }
-      startSession(selected);
+      startSession({ categories, types, maxScore });
     });
   }
 
-  function startSession(categories) {
+  function startSession({ categories, types, maxScore } = {}) {
     let ids = problems
-      .filter(
-        (p) =>
-          !p.deleted &&
-          (categories
-            ? (p.categories || []).some((c) => categories.includes(c))
-            : true)
-      )
+      .filter((p) => {
+        if (p.deleted) return false;
+
+        // カテゴリ
+        if (categories && categories.length) {
+          if (!p.categories || !p.categories.length) return false;
+          if (!p.categories.some((c) => categories.includes(c))) return false;
+        }
+
+        // タイプ
+        const t = p.type || 'mask';
+        if (types && types.length && !types.includes(t)) return false;
+
+        // スコア条件
+        if (typeof maxScore === 'number') {
+          const s = typeof p.score === 'number' ? p.score : 0;
+          if (s > maxScore) return false;
+        }
+
+        return true;
+      })
       .map((p) => p.id);
 
     if (!ids.length) {
-      alert('出題できる問題がありません。Bタブで作成してください。');
+      alert('出題できる問題がありません。条件を変えて再度お試しください。');
       return;
     }
 
@@ -761,12 +1084,21 @@
     appState.forcedQueue = [];
     saveAppState();
 
-    setReveal(false);
-    renderQuestion(nextQuestionId());
+    const firstId = nextQuestionId();
+    renderQuestion(firstId);
   }
 
   if (questionContainer) {
     questionContainer.addEventListener('click', (e) => {
+      // ○×回答ボタン
+      const oxBtn = e.target.closest && e.target.closest('.ox-answer');
+      if (oxBtn) {
+        const ans = oxBtn.getAttribute('data-answer');
+        if (ans === 'o' || ans === 'x') handleOxAnswer(ans);
+        return;
+      }
+
+      // マスククリックで一時表示
       const m = e.target.closest && e.target.closest('.mask');
       if (!m) return;
       if (isRevealed) return;
@@ -774,26 +1106,56 @@
     });
   }
 
+  function updateAnswerBarForType(type) {
+    if (!revealBtn || !judgeBtns) return;
+    if (type === 'ox') {
+      // ○×問題は自動採点なのでバーは非表示
+      revealBtn.style.display = 'none';
+      judgeBtns.classList.add('hidden');
+    } else {
+      revealBtn.style.display = '';
+      judgeBtns.classList.add('hidden');
+      revealBtn.textContent = '解答確認';
+    }
+  }
+
   function setReveal(show) {
     isRevealed = show;
+    const p = getCurrentProblem();
+    const type = p?.type || 'mask';
+
     if (!questionContainer) return;
 
+    // 一時表示をリセット
     questionContainer
       .querySelectorAll('.mask.peek')
       .forEach((m) => m.classList.remove('peek'));
 
+    if (type === 'ox') {
+      // ○×問題は reveal 機能を使わない
+      updateAnswerBarForType('ox');
+      return;
+    }
+
+    updateAnswerBarForType(type);
+
     if (show) {
-      if (revealBtn) revealBtn.textContent = '解答を隠す';
-      if (judgeBtns) judgeBtns.classList.remove('hidden');
-      questionContainer
-        .querySelectorAll('.mask')
-        .forEach((m) => m.classList.add('revealed'));
+      revealBtn.textContent = '解答を隠す';
+      judgeBtns.classList.remove('hidden');
     } else {
-      if (revealBtn) revealBtn.textContent = '解答確認';
-      if (judgeBtns) judgeBtns.classList.add('hidden');
+      revealBtn.textContent = '解答確認';
+      judgeBtns.classList.add('hidden');
+    }
+
+    if (type === 'mask') {
       questionContainer
         .querySelectorAll('.mask')
-        .forEach((m) => m.classList.remove('revealed'));
+        .forEach((m) =>
+          m.classList.toggle('revealed', show)
+        );
+    } else if (type === 'qa') {
+      const ans = questionContainer.querySelector('.qa-answer');
+      if (ans) ans.style.display = show ? 'block' : 'none';
     }
   }
 
@@ -810,13 +1172,43 @@
   }
 
   function renderQuestion(id) {
-    const p = problems.find((x) => x.id === id);
+    const p = getProblemById(id);
     if (!p || !questionContainer) return;
+    revealedMaskStack = []; // ★追加：直前に外したマスク履歴をリセット
     currentId = id;
-    questionContainer.innerHTML =
-      p.html || '<div class="placeholder">本文なし</div>';
+    oxAnswered = false;
+
+    const type = p.type || 'mask';
+
+    if (type === 'qa') {
+      questionContainer.innerHTML = `
+        <div class="qa-question">${escapeHTML(p.question || '')}</div>
+        <div class="qa-answer" style="display:none;">
+          <span class="muted">解答：</span>${escapeHTML(p.answer || '')}
+        </div>
+      `;
+    } else if (type === 'ox') {
+      questionContainer.innerHTML = `
+        <div class="ox-question">${escapeHTML(p.question || '')}</div>
+        <div class="row gap ox-buttons">
+          <button class="btn good ox-answer" data-answer="o">〇</button>
+          <button class="btn bad ox-answer" data-answer="x">×</button>
+        </div>
+        <div id="oxExplanation" class="ox-explanation muted"></div>
+      `;
+    } else {
+      // マスク（従来）
+      questionContainer.innerHTML =
+        p.html || '<div class="placeholder">本文なし</div>';
+    }
+
     questionContainer.scrollTop = 0;
-    setReveal(false);
+    updateAnswerBarForType(type);
+    if (type === 'ox') {
+      isRevealed = false;
+    } else {
+      setReveal(false);
+    }
   }
 
   const weightOf = (p) => 1 / (1 + Math.max(0, p.score || 0));
@@ -841,7 +1233,7 @@
     const list   = cand.length ? cand : currentPool;
     const items  = list.map((id) => ({
       id,
-      w: weightOf(problems.find((x) => x.id === id) || {}),
+      w: weightOf(getProblemById(id) || {}),
     }));
     const total = items.reduce((s, x) => s + x.w, 0);
     let r = Math.random() * total;
@@ -862,8 +1254,8 @@
     return fb;
   }
 
-  function gradeCurrent(mark) {
-    const p = problems.find((x) => x.id === currentId);
+  /* ===== 採点共通処理 ===== */
+  function applyMark(p, mark) {
     if (!p) return;
 
     let d = 0;
@@ -896,11 +1288,68 @@
     saveAppState();
 
     renderD();
+  }
+
+  function gradeCurrent(mark) {
+    const p = getCurrentProblem();
+    if (!p) return;
+
+    // マスク＆文章問題のみ手動採点
+    if (p.type === 'ox') return;
+
+    applyMark(p, mark);
+
     renderQuestion(nextQuestionId());
+  }
+
+  function handleOxAnswer(userMark) {
+    const p = getCurrentProblem();
+    if (!p || p.type !== 'ox' || !questionContainer) return;
+    if (oxAnswered) return;
+    oxAnswered = true;
+
+    const correctMark = p.correct === 'x' ? 'x' : 'o';
+    const isCorrect = userMark === correctMark;
+
+    applyMark(p, isCorrect ? 'o' : 'x');
+
+    // ボタンを無効化
+    questionContainer
+      .querySelectorAll('.ox-answer')
+      .forEach((btn) => (btn.disabled = true));
+
+    // 解説表示
+    const expEl = questionContainer.querySelector('#oxExplanation');
+    if (expEl) {
+      let msg = isCorrect ? '正解です。' : '不正解です。';
+      if (p.explanation) msg += ' ' + p.explanation;
+      expEl.textContent = msg;
+
+      const nextBtn = document.createElement('button');
+      nextBtn.className = 'btn primary small';
+      nextBtn.style.marginTop = '8px';
+      nextBtn.textContent = '次の問題へ';
+      nextBtn.addEventListener('click', () => {
+        renderQuestion(nextQuestionId());
+      });
+      expEl.appendChild(document.createElement('br'));
+      expEl.appendChild(nextBtn);
+    }
   }
 
   /* ===== D：記録 ===== */
   let progressChart = null;
+  let currentScoreThreshold = 3; // +3以上がデフォルト
+
+  // スコアthresholdボタン
+  scoreFilterButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const th = Number(btn.getAttribute('data-threshold') || '3');
+      currentScoreThreshold = th;
+      scoreFilterButtons.forEach((b) => b.classList.toggle('primary', b === btn));
+      renderCategoryChart();
+    });
+  });
 
   function renderD() {
     renderCategoryChart();
@@ -910,21 +1359,29 @@
   function renderCategoryChart() {
     if (!progressCanvas || !window.Chart) return;
 
-    const cats = Object.keys(categoryStats).sort((a, b) =>
-      a.localeCompare(b, 'ja')
-    );
+    // カテゴリごとに「score >= currentScoreThreshold」の問題数を数える
+    const counts = {};
+    problems
+      .filter((p) => !p.deleted)
+      .forEach((p) => {
+        const s = typeof p.score === 'number' ? p.score : 0;
+        if (s < currentScoreThreshold) return;
+        (p.categories || []).forEach((cat) => {
+          if (!cat) return;
+          counts[cat] = (counts[cat] || 0) + 1;
+        });
+      });
+
+    const cats = Object.keys(counts).sort((a, b) => a.localeCompare(b, 'ja'));
     const labels = cats.length ? cats : ['(データなし)'];
-    const rates = cats.map((c) => {
-      const s = categoryStats[c] || { correct: 0, total: 0 };
-      return s.total ? Math.round((s.correct / s.total) * 1000) / 10 : 0;
-    });
+    const dataValues = cats.length ? cats.map((c) => counts[c]) : [0];
 
     const data = {
       labels,
       datasets: [
         {
-          label: '正答率（%）',
-          data: rates,
+          label: `スコア${currentScoreThreshold}以上の問題数`,
+          data: dataValues,
         },
       ],
     };
@@ -935,9 +1392,8 @@
       scales: {
         y: {
           beginAtZero: true,
-          max: 100,
           ticks: {
-            callback: (v) => v + '%',
+            precision: 0,
           },
         },
       },
@@ -989,36 +1445,125 @@
     }
   }
 
-  /* ===== 初期描画 ===== */
-  // 初期ロード時は重たい Cタブ・Dタブは描画しない。
-  // それぞれタブを開いたタイミングで renderC() / renderD() が実行される。
+/* ===== マスク問題：キーボード操作（完成版） ===== */
+document.addEventListener('keydown', (e) => {
 
+  // 入力中は無効
+  const tag = document.activeElement.tagName.toLowerCase();
+  if (['input', 'textarea', 'select'].includes(tag)) return;
+  if (document.activeElement.isContentEditable) return;
+
+  // モーダル中は無効
+  if (!catModal.classList.contains('hidden') || !editModal.classList.contains('hidden')) {
+    return;
+  }
+
+  const p = getCurrentProblem();
+  if (!p || p.type !== 'mask') return;
+  if (!questionContainer) return;
+
+/* ===== P：すべて再マスク ===== */
+if (e.key === 'p' || e.key === 'P') {
+
+    questionContainer.querySelectorAll('.mask')
+      .forEach(m => m.classList.remove('revealed'));
+
+    revealedMaskStack = [];
+    isRevealed = false;
+    if (revealBtn) revealBtn.textContent = '解答確認';
+    if (judgeBtns) judgeBtns.classList.add('hidden');
+
+    e.preventDefault();
+    return;
+  }
+
+  /* ===== Backspace / Delete：直前に外したマスクを戻す ===== */
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    if (revealedMaskStack.length > 0) {
+      const last = revealedMaskStack.pop();
+      last.classList.remove('revealed');
+      e.preventDefault();
+    }
+    return;
+  }
+
+  /* ===== Enter：マスクを1つ外す ===== */
+  if (e.key === 'Enter') {
+    const masks = questionContainer.querySelectorAll('.mask:not(.revealed)');
+    if (masks.length > 0) {
+      const m = masks[0];
+      m.classList.add('revealed');
+      revealedMaskStack.push(m);
+      e.preventDefault();
+      return;
+    }
+
+    // 全部外し終わったら解答表示
+    if (!isRevealed) {
+      setReveal(true);
+      e.preventDefault();
+      return;
+    }
+
+    // 次の問題へ
+    renderQuestion(nextQuestionId());
+    e.preventDefault();
+    return;
+  }
+
+  /* ===== O / D / X：キーボード採点 ===== */
+  if (!isRevealed) return; // 解答表示中のみ有効
+
+  if (e.key === 'o' || e.key === 'O') {
+    gradeCurrent('o'); // 〇
+    e.preventDefault();
+    return;
+  }
+
+  if (e.key === 'd' || e.key === 'D') {
+    gradeCurrent('d'); // △
+    e.preventDefault();
+    return;
+  }
+
+  if (e.key === 'x' || e.key === 'X') {
+    gradeCurrent('x'); // ×
+    e.preventDefault();
+    return;
+  }
+});
+
+
+
+
+  /* ===== 初期描画 ===== */
   window.addEventListener('beforeunload', () => {
     // 念のため全体を保存
     saveProblems();
     saveStats();
     saveAppState();
   });
+
+  // Bタブ初期表示はマスク
+  setBType('mask');
 })();
 
-
+/* ===== localStorage 使用量ユーティリティ ===== */
 function getLocalStorageUsage() {
   let total = 0;
-  for (let key in localStorage) {
-    if (localStorage.hasOwnProperty(key)) {
-      const val = localStorage.getItem(key);
-      total += key.length + (val ? val.length : 0);
-    }
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    const val = localStorage.getItem(key);
+    total += (key ? key.length : 0) + (val ? val.length : 0);
   }
   return total;
 }
 
 function formatBytes(bytes) {
   const kb = bytes / 1024;
-  if (kb < 1024) return kb.toFixed(2) + " KB";
-  return (kb / 1024).toFixed(2) + " MB";
+  if (kb < 1024) return kb.toFixed(2) + ' KB';
+  return (kb / 1024).toFixed(2) + ' MB';
 }
 
 // 一般的な localStorage 容量の目安（5MB）
 const LOCALSTORAGE_LIMIT = 5 * 1024 * 1024;
-
