@@ -578,6 +578,45 @@ function compactMaskHTML(html) {
   }
 
   /* ===== C：編集/確認 ===== */
+  /* ===== deleted 問題を完全削除 ===== */
+function purgeDeletedProblems() {
+  const beforeCount = problems.length;
+  const beforeSize = JSON.stringify(problems).length;
+
+  const deletedCount = problems.filter(p => p.deleted).length;
+
+  if (deletedCount === 0) {
+    alert('完全削除できる問題はありません。');
+    return;
+  }
+
+  if (
+    !confirm(
+      `削除済み問題を完全に削除します。\n` +
+      `対象：${deletedCount} 件\n` +
+      `※ この操作は元に戻せません`
+    )
+  ) {
+    return;
+  }
+
+  problems = problems.filter(p => !p.deleted);
+
+  const afterCount = problems.length;
+  const afterSize = JSON.stringify(problems).length;
+
+  saveProblems();
+
+  alert(
+    `完全削除が完了しました。\n\n` +
+    `問題数：${beforeCount} → ${afterCount}\n` +
+    `容量：${beforeSize} → ${afterSize} bytes\n` +
+    `削減：${beforeSize - afterSize} bytes`
+  );
+
+  renderC();
+}
+
   let currentCatFilter = [];
   let currentTypeFilter = 'all';
   const MAX_LIST_ITEMS = 200; // 一覧に表示する最大件数（負荷軽減）
