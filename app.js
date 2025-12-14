@@ -361,6 +361,31 @@ function convertRedSpanToMask(html) {
       range.insertNode(wrap);
     }
   }
+　　/* ===== 選択範囲内のマスクをすべて解除 ===== */
+function unmaskInSelection(rootEditable) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+
+  const range = sel.getRangeAt(0);
+  if (range.collapsed) return;
+  if (!rootEditable.contains(range.commonAncestorContainer)) return;
+
+  const masks = Array.from(rootEditable.querySelectorAll('.mask')).filter(m =>
+    range.intersectsNode(m)
+  );
+
+  if (masks.length === 0) return;
+
+  masks.forEach(mask => {
+    const parent = mask.parentNode;
+    while (mask.firstChild) {
+      parent.insertBefore(mask.firstChild, mask);
+    }
+    parent.removeChild(mask);
+  });
+
+  sel.removeAllRanges();
+}
 
   /* ===== タブ切替 ===== */
   tabButtons.forEach((btn) => {
