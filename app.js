@@ -907,6 +907,8 @@ function purgeDeletedProblems() {
 
   /* ===== 編集モーダル ===== */
   let editingId = null;
+  let editUnmaskMode = false; // ★ 解除モードON/OFF
+
 
   function getProblemById(id) {
     return problems.find((x) => x.id === id) || null;
