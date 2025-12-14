@@ -227,6 +227,7 @@ function compactMaskHTML(html) {
   const clearCatFilterBtn  = $('#clearCatFilterBtn');
   const exportJsonBtn      = $('#exportJsonBtn');
   const importJsonInput    = $('#importJsonInput');
+  const purgeDeletedBtn = $('#purgeDeletedBtn');
   const storageInfoEl      = $('#storageInfo');
   const cTypeButtons       = $$('.ctype-btn');
 
@@ -873,6 +874,12 @@ function purgeDeletedProblems() {
       }
     });
   }
+
+  　　　if (purgeDeletedBtn) {
+ 　　　 purgeDeletedBtn.addEventListener('click', () => {
+   　　 purgeDeletedProblems();
+  });
+}
 
   /* ===== 編集モーダル ===== */
   let editingId = null;
