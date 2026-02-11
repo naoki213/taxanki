@@ -245,7 +245,7 @@ function convertRedSpanToMask(html) {
   const purgeDeletedBtn = $('#purgeDeletedBtn');
   const storageInfoEl      = $('#storageInfo');
   const cTypeButtons       = $$('.ctype-btn');
-
+  const searchInput        = $('#searchInput');   
   // D
   const progressCanvas      = $('#progressChart');
   const dailyList           = $('#dailyList');
@@ -669,6 +669,7 @@ function purgeDeletedProblems() {
 
   let currentCatFilter = [];
   let currentTypeFilter = 'all';
+  let currentSearchKeyword = '';  
   const MAX_LIST_ITEMS = 200; // 一覧に表示する最大件数（負荷軽減）
 
   function updateStorageInfo() {
@@ -684,6 +685,13 @@ function purgeDeletedProblems() {
     renderProblemList();
     updateStorageInfo();
   }
+
+  if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    currentSearchKeyword = searchInput.value.trim();
+    renderProblemList();
+  });
+}
 
   function renderCategoryChips() {
     if (!catChips) return;
@@ -731,17 +739,47 @@ function purgeDeletedProblems() {
   });
 
   function problemMatchesFilter(p) {
-    if (p.deleted) return false;
+  if (p.deleted) return false;
 
-    // 形式フィルタ
-    const t = p.type || 'mask';
-    if (currentTypeFilter !== 'all' && t !== currentTypeFilter) return false;
+  const t = p.type || 'mask';
 
-    // カテゴリフィルタ
-    if (currentCatFilter.length === 0) return true;
+  // ① 形式フィルタ
+  if (currentTypeFilter !== 'all' && t !== currentTypeFilter) return false;
+
+  // ② カテゴリフィルタ
+  if (currentCatFilter.length > 0) {
     if (!p.categories || !p.categories.length) return false;
-    return p.categories.some((c) => currentCatFilter.includes(c));
+    if (!p.categories.some((c) => currentCatFilter.includes(c))) return false;
   }
+
+  // ③ 🔍 検索フィルタ（★追加）
+  if (currentSearchKeyword) {
+    const keyword = currentSearchKeyword.toLowerCase();
+
+    let targetText = '';
+
+    if (p.type === 'qa') {
+      targetText =
+        (p.question || '') +
+        (p.answer || '');
+    } else if (p.type === 'ox') {
+      targetText =
+        (p.question || '') +
+        (p.explanation || '');
+    } else {
+      // mask問題 → HTMLからテキスト抽出
+      const div = document.createElement('div');
+      div.innerHTML = p.html || '';
+      targetText = div.textContent || '';
+    }
+
+    if (!targetText.toLowerCase().includes(keyword)) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
   function renderProblemList() {
     if (!problemList) return;
